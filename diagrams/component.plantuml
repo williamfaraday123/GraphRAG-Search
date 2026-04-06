@@ -1,0 +1,53 @@
+@startuml
+skinparam componentStyle rectangle
+skinparam NoteBackgroundColor #E1F5FE
+skinparam ranksep 150
+skinparam nodesep 100
+
+package "Client Layer" {
+    [Web Search UI (React)] as UI
+}
+
+package "API Gateway & Orchestration (AWS EC2)" {
+    [Spring Boot Service] as App
+    note bottom of App: Manages Async Streams\n(SSE/WebSockets)
+}
+
+package "Intelligence Engine (FastAPI + LangGraph)" {
+    [Query Processor] as QP
+    
+    node "LangGraph Iterative Engine" {
+        [Vertex Agent Logic] as VAL
+        [Pregel State Coordinator] as PSC
+    }
+    
+    [LLM Aggregator (LangChain)] as LLM_Agg
+    note bottom of PSC: Executes 'Supersteps'\nuntil Rank Convergence
+}
+
+package "Data Layer (AWS Managed)" {
+    database "Milvus (Vector DB)" as VDB
+    database "Neo4j (Knowledge Graph)" as Graph
+    [AWS S3 (Source Docs)] as S3
+}
+
+' Interaction Flow
+UI -right-> App : HTTP POST /api/v1/search\n(JSON Query)
+App -down-> QP : gRPC: startProcessing()
+
+' Hybrid Retrieval
+QP -down-> VDB : Similarity Search
+QP -down-> Graph : Edge Retrieval
+
+' Pregel Cycle
+Graph -right-> PSC : Initial Sub-graph
+PSC <-> VAL : Message Passing (Supersteps)
+VAL -down-> LLM_Agg : Optimised Consensus State
+
+' Generative Flow
+LLM_Agg -left-> App : Synthesized Answer
+App -up-> UI : WebSocket/SSE Stream\n(Real-time token generation)
+
+' Reference
+QP -[dashed]-> S3 : Fetch Citations/Metadata
+@enduml

@@ -1,0 +1,66 @@
+@startuml
+skinparam style strictuml
+hide footbox
+
+participant "Web Search UI\n(React)" as UI
+participant "Orchestration Layer\n(Spring Boot)" as App
+
+box "Intelligence Engine (FastAPI + LangGraph)" #F0F8FF
+    participant "Query Processor" as QP
+    participant "LangGraph\nIterative Engine" as LGE
+    participant "LLM Aggregator\n(LangChain)" as LLM_Agg
+end box
+
+box "Data Layer" #FFF9E3
+    database "Milvus\n(Vector DB)" as VDB
+    database "Neo4j\n(Graph DB)" as Graph
+    entity "AWS S3" as S3
+end box
+
+participant "LLM Provider\n(OpenAI/Anthropic)" as AI
+
+== 1. Hybrid Retrieval Phase ==
+
+UI -> App : HTTP POST /api/v1/search\n{prompt: "..."}
+activate App
+
+App -> QP : gRPC: startProcessing(prompt)
+activate QP
+
+QP -> VDB : Vector Similarity Search (Top-K Chunks)
+VDB --> QP : Candidate Chunks
+
+QP -> Graph : Relationship Retrieval
+Graph --> QP : Neighbourhood Nodes/Edges
+
+QP -> S3 : Fetch Citations & Metadata
+S3 --> QP : Source Details
+
+== 2. Pregel Iteration Phase (LangGraph) ==
+
+QP -> LGE : Initialize StateGraph(Chunks + Matrix)
+activate LGE
+
+loop Supersteps 1 to N (Until Convergence)
+    LGE -> LGE : Thinking like a Vertex:\nUpdate Node Scores & Pass Messages
+end
+
+LGE --> LLM_Agg : Optimized Consensus Context
+deactivate LGE
+deactivate QP
+
+== 3. Synthesis & Streaming Phase ==
+
+activate LLM_Agg
+LLM_Agg -> AI : Prompt + Authority-Ranked Context
+activate AI
+AI -->> LLM_Agg : Token Stream
+deactivate AI
+
+LLM_Agg -->> App : Processed Stream
+deactivate LLM_Agg
+
+App -->> UI : SSE: Real-time Answer
+deactivate App
+
+@enduml
