@@ -42,3 +42,39 @@ query-processor/
     - The synthesizer node takes the refined context and asks the LLM (OpenAI) to write the final answer.
     Instead of waiting for the whole text, the Python code splits the answer into words and yields them one by one over the gRPC stream.
     - Spring Boot receives these chunks instantly and pushes them to the React UI via SSE, creating the "typewriter" effect.
+
+Start Docker Desktop — open it from the Start Menu and wait until the status shows green/"Running" in the system tray.
+
+MinIO needs to be running first. Start it from the project root:
+```
+cd C:\Users\estee\Desktop\reimagine-google-pagerank-search-for-generative-information-retrieval-2
+docker compose up minio -d
+```
+Then verify it's running
+```
+docker compose ps minio
+```
+
+Start Neo4j:
+```
+docker compose up neo4j -d
+```
+Verify it's up:
+```
+docker compose ps neo4j
+```
+
+Install ollama
+```
+ollama pull deepseek-r1:1.5b
+```
+Go to Settings, toggle on 'Expose ollama to network'
+
+```
+cd ingestion_pipeline
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
+python upload_to_minio.py # upload all .txt files from the raw_data folder into MinIO's rag-datasets bucket
+python main.py
+```

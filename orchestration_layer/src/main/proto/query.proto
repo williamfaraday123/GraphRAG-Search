@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package query;
+
+option java_package = "com.example.orchestration_layer.grpc";
+option java_outer_classname = "QueryProto";
+
+service QueryProcessorService {
+  rpc StartProcessing (SearchRequest) returns (stream SearchResponse);
+}
+
+message SearchRequest {
+  string prompt = 1;
+  int32 top_k = 2;
+  bool use_graph_refinement = 3;
+}
+
+message SearchResponse {
+  oneof response_type {
+    ProcessingStatus status = 1;
+    StreamChunk chunk = 2;
+    FinalAnswer answer = 3;
+  }
+}
+
+message ProcessingStatus {
+  string stage = 1;
+  string message = 2;
+}
+
+message StreamChunk {
+  string content = 1;
+  string source_id = 2;
+}
+
+message FinalAnswer {
+  string text = 1;
+  repeated string sources = 2;
+  float confidence_score = 3;
+}

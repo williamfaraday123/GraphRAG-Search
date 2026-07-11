@@ -1,8 +1,8 @@
 from typing import List, Dict, Any
-from app.services.milvus_client import MilvusService
-from app.services.neo4j_client import Neo4jService
-from app.services.object_storage_client import ObjectStorageRetriever
-from app.embedding import EmbeddingService
+from services.milvus_client import MilvusService
+from services.neo4j_client import Neo4jService
+from services.object_storage_client import ObjectStorageRetriever
+from embedding import EmbeddingService
 import logging
 
 logger = logging.getLogger(__name__)

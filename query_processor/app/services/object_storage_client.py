@@ -1,7 +1,8 @@
 import boto3
-from langchain.vectorstores import FAISS # or Weaviate, Milvus, etc.
-from langchain.embeddings import OpenAIEmbeddings
-from typing import Dict, Any
+from botocore.config import Config
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from typing import Dict, Any, Optional
 
 class ObjectStorageRetriever:
     def __init__(self, vector_store, bucket_name: str, aws_access_key_id: str, aws_secret_access_key: str, endpoint_url: Optional[str] = None):

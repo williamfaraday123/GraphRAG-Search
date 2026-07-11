@@ -1,1 +1,11 @@
 query_processor/venv/
+query_processor/app/query_pb2_grpc.py
+query_processor/app/query_pb2.py
+query_processor/app/__pycache__/
+query_processor/app/services/__pycache__/
+
+ingestion_pipeline/venv/
+ingestion_pipeline/__pycache__/
+volumes/
+
+.env

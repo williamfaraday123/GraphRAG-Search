@@ -1,9 +1,35 @@
 Instructions to run this:
+
+Start Milvus:
+Navigate to project root
+```
+docker compose up milvus-standalone -d
+```
+
+Make sure Docker is running and the containers are up:
+```
+docker compose ps
+```
+
 ```
 cd query_processor
 python -m venv venv
 venv\Scripts\activate.bat
 pip install -r requirements.txt
+```
+
+Generate the Python gRPC stubs from the proto file:
+```
+cd proto
+python -m grpc_tools.protoc -I. --python_out=../app --grpc_python_out=../app query.proto
+cd ..
+```
+This creates two files in app/:
+- app/query_pb2.py — the message classes
+- app/query_pb2_grpc.py — the server/client stubs
+
+run main.py:
+```
 cd app
 python main.py
 ```

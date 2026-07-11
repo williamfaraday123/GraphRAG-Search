@@ -5,3 +5,21 @@ This project aims to develop an AI-powered search engine for Internet by leverag
 <img width="4111" height="1270" alt="image" src="https://github.com/user-attachments/assets/791b172b-8a35-4b39-8470-c47d323bee05" />
 
 <img width="3448" height="1817" alt="image" src="https://github.com/user-attachments/assets/10c695cb-3b92-4891-abd1-0cad5df408ba" />
+
+To run, navigate to root and enter:
+```
+docker compose up --build
+```
+- up: Starts the containers.
+- --build: Forces Docker to rebuild the images based on Dockerfiles before starting.
+- Press Ctrl+C to stop.
+
+To stop the containers and preserve data in volumes
+```
+docker compose stop
+```
+
+To delete the containers and networks (reset environment)
+```
+docker compose down
+```

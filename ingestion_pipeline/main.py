@@ -1,25 +1,15 @@
 # Run the whole pipeline
 
 import os
-import glob
+import logging
 from config import Config
-from data_loader import load_documents # Assume simple file reader
+from data_loader import MinIODataLoader
 from chunker import DocumentChunker
 from edge_generator import EdgeGenerator
 from graph_builder import GraphBuilder
-import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def load_documents_from_folder(path: str) -> List[Dict]:
-    """Simple helper to read text files."""
-    docs = []
-    for filepath in glob.glob(f"{path}/*.txt"): # Support .txt, .md, etc.
-        with open(filepath, 'r', encoding='utf-8') as f:
-            content = f.read()
-            docs.append({"content": content, "source": os.path.basename(filepath)})
-    return docs
 
 def run_ingestion_pipeline():
     logger.info("=== Starting Knowledge Graph Construction ===")
@@ -28,10 +18,11 @@ def run_ingestion_pipeline():
     chunker = DocumentChunker(Config.CHUNK_SIZE, Config.CHUNK_OVERLAP)
     edge_gen = EdgeGenerator()
     db = GraphBuilder()
+    data_loader = MinIODataLoader()
     
     try:
-        # 2. Load Raw Data
-        raw_docs = load_documents_from_folder(Config.DATA_SOURCE_PATH)
+        # 2. Load Raw Data from MinIO
+        raw_docs = data_loader.load_documents()
         logger.info(f"Loaded {len(raw_docs)} raw documents.")
         
         all_nodes = []

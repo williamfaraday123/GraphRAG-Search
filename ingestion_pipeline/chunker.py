@@ -1,6 +1,6 @@
 # Use LangChain to break documents into semantic nodes.
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import List, Dict
 import hashlib
 import logging

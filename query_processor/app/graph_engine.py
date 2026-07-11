@@ -1,4 +1,4 @@
-from typing import TypedDict, List, Annotated, Sequence
+from typing import TypedDict, List, Dict, Annotated, Sequence
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -113,7 +113,11 @@ def retrieve_initial_context(state: AgentState):
 
 def critical_analysis_node(state: AgentState):
     """Step 2: LLM analyzes gaps in the current context"""
-    llm = ChatOpenAI(model="gpt-4-turbo", temperature=0)
+    llm = ChatOpenAI(
+        model=os.getenv("EDGE_MODEL", "qwen2.5:1.5b"),
+        base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
+        api_key=os.getenv("LLM_API_KEY", "ollama")
+    )
     
     # Format context to include *why* it was chosen (optional but helpful for debugging)
     context_items = []
@@ -125,8 +129,8 @@ def critical_analysis_node(state: AgentState):
     
     context_text = "\n\n".join(context_items)
    
+    system_msg = SystemMessage(content="You are a Research Analyst analyzing a knowledge sub-graph.")
     prompt = f"""
-    You are a Research Analyst analyzing a knowledge sub-graph.
     Query: {state['query']}
     
     The following context has been retrieved and re-ranked using both semantic similarity 
@@ -144,7 +148,7 @@ def critical_analysis_node(state: AgentState):
     """
         
     
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = llm.invoke([system_msg, HumanMessage(content=prompt)])
     content = response.content.strip()
     
     if "CONVERGED" in content:
@@ -159,7 +163,11 @@ def critical_analysis_node(state: AgentState):
 
 def synthesize_answer(state: AgentState):
     """Step 3: Generate final response"""
-    llm = ChatOpenAI(model="gpt-4-turbo", temperature=0.3)
+    llm = ChatOpenAI(
+        model=os.getenv("EDGE_MODEL", "qwen2.5:1.5b"),
+        base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
+        api_key=os.getenv("LLM_API_KEY", "ollama")
+    )
     
         
     context_text = "\n\n".join([

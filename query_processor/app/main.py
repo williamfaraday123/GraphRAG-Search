@@ -1,35 +1,35 @@
 import grpc
 from concurrent import futures
 import logging
+import os
 from typing import Iterator
 
-# Import generated gRPC code (assuming you ran grpc_tools.protoc)
-# import query_pb2
-# import query_pb2_grpc
+# Import generated gRPC code (generated via: grpc_tools.protoc)
+import query_pb2
+import query_pb2_grpc
 
-from app.retriever import HybridRetriever # Wrapper for Milvus/Neo4j
-from app.graph_engine import build_query_graph
+from retriever import HybridRetriever
+from graph_engine import build_query_graph
+
+# Aliases for readability
+SearchRequest = query_pb2.SearchRequest
+SearchResponse = query_pb2.SearchResponse
+ProcessingStatus = query_pb2.ProcessingStatus
+StreamChunk = query_pb2.StreamChunk
+FinalAnswer = query_pb2.FinalAnswer
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mocking the proto classes for this snippet representation
-# In real code: from query_pb2 import SearchRequest, SearchResponse, ProcessingStatus, etc.
-class SearchRequest: pass
-class SearchResponse: pass
-class ProcessingStatus: pass
-class StreamChunk: pass
-class FinalAnswer: pass
-
 class QueryProcessorServicer:
     def __init__(self):
-        # config
-        MILVUS_HOST = os.getenv("MILVUS_HOST", "milvus-standalone")
+        # config — defaults assume Docker Compose with port mapping; override in .env for custom setups
+        MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
         MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
-        NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+        NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-        NEO4J_PASS = os.getenv("NEO4J_PASS", "password123")
+        NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password123")
 
         # Initialize Clients
         self.retriever = HybridRetriever(
@@ -37,7 +37,7 @@ class QueryProcessorServicer:
             milvus_port=MILVUS_PORT,
             neo4j_uri=NEO4J_URI,
             neo4j_user=NEO4J_USER,
-            neo4j_password=NEO4J_PASS,
+            neo4j_password=NEO4J_PASSWORD,
             embedding_model="all-MiniLM-L6-v2" # Must match Milvus collection dimension
         )
         self.app_graph = build_query_graph()
@@ -126,8 +126,7 @@ class QueryProcessorServicer:
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    # query_pb2_grpc.add_QueryProcessorServiceServicer_to_server(QueryProcessorServicer(), server)
-    # For this snippet, we assume the registration happens
+    query_pb2_grpc.add_QueryProcessorServiceServicer_to_server(QueryProcessorServicer(), server)
     server.add_insecure_port('[::]:50051')
     server.start()
     logger.info("Query Processor gRPC server started on port 50051")

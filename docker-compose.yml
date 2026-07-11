@@ -1,9 +1,7 @@
-version: '3.5'
-
 services:
   # 1. Milvus Standalone (Vector DB)
   milvus-standalone:
-    image: milvusdb/milvus:v2.4
+    image: milvusdb/milvus:v2.5.9
     container_name: milvus-standalone
     command: ["milvus", "run", "standalone"]
     environment:
@@ -30,8 +28,10 @@ services:
     ports:
       - "7474:7474" # Browser
       - "7687:7687" # Bolt driver
-    depends_on:
-      - milvus-standalone
+    # depends_on:
+    #   - milvus-standalone
+    # (Removed to prevent startup deadlocks, handle connection in app code)
+    
 
   # 3. MinIO (S3 Compatible Storage for source docs)
   minio:
@@ -49,8 +49,12 @@ services:
 
   # 4. Etcd (Required for Milvus)
   etcd:
-    image: quay.io/coreos/etcd:v3.5
+    image: gcr.io/etcd-development/etcd:v3.5.20
     container_name: etcd
+    command:
+      - /usr/local/bin/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
     volumes:
       - ./volumes/etcd:/etcd
     environment:
@@ -58,6 +62,32 @@ services:
       - ETCD_AUTO_COMPACTION_RETENTION=1000
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
+
+  ingestion_pipeline:
+    # Instead of pulling an image, build from the local directory
+    build: 
+      context: ./ingestion_pipeline # Path to the folder containing the Dockerfile
+      dockerfile: Dockerfile        # Filename (optional if named Dockerfile)
+    container_name: ai-ingestion
+    # Keep this container running after the script finishes (for logs/debugging)
+    # If your script is a one-time job, it will exit automatically.
+    command: tail -f /dev/null 
+    # Wait for databases to start
+    depends_on:
+      - milvus-standalone
+      - neo4j
+      - minio
+
+  query_processor:
+    build: 
+      context: ./query_processor
+      dockerfile: Dockerfile
+    container_name: ai-query-api
+    ports:
+      - "8000:8000" # Expose API port
+    depends_on:
+      - neo4j
+      - milvus-standalone
 
 volumes:
   milvus_data:
