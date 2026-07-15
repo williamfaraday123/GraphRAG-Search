@@ -24,8 +24,14 @@ class Config:
     EDGE_MODEL_BASE_URL = os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1")
     
     # Chunking
-    CHUNK_SIZE = 1000
-    CHUNK_OVERLAP = 200
+    CHUNK_SIZE = os.getenv("CHUNK_SIZE", 1500) # Larger chunks → better semantic units
+    CHUNK_OVERLAP = os.getenv("CHUNK_OVERLAP", 200)
+    # For large datasets: limit chunks per document to control graph size
+    # Set to 0 for unlimited (all chunks go into Neo4j + Milvus)
+    MAX_CHUNKS_PER_DOC = int(os.getenv("MAX_CHUNKS_PER_DOC", "500")) 
+    # Selective indexing: only index chunks that have at least one edge
+    # Set to True to reduce Milvus size for large corpuses
+    INDEX_ONLY_CONNECTED_CHUNKS = os.getenv("INDEX_ONLY_CONNECTED_CHUNKS", "true").lower() == "true"  	Only chunks with LLM-identified edges go to Milvus
     
     # Input Data Source (Local folder for demo, S3 for prod)
     DATA_SOURCE_PATH = os.getenv("DATA_SOURCE_PATH", "./raw_data")

@@ -557,3 +557,12 @@ taskkill /PID <PID> /F
 > ├── volumes/                    # Docker persistent data (gitignored)
 > └── README.md                   # Project overview
 > ```
+
+
+
+
+
+# Orchestration Layer — Spring Boot API Gateway
+
+This is the REST → gRPC bridge layer. It receives search queries from the React UI via HTTP POST, forwards them to the Python Query Processor via gRPC, and streams results back to the UI using Server-Sent Events (SSE).
+

@@ -1,10 +1,6 @@
-# Final Year Project: Reimagine-Google-Pagerank-Search-for-Generative-Information-Retrieval
+# Orchestration Layer — Spring Boot API Gateway
 
-This project aims to develop an AI-powered search engine for Internet by leveraging Large Language Models (LLMs) like Perplexity AI and SearchGPT. The system will search and analyze online resources from databases such as the current Internet, providing intelligent retrieval, evaluation, and recommendation of relevant applications. By integrating AI-driven chatbot capabilities with traditional search engine algorithms, it will lead to next-generation search engine for information retrieval in the Internet.
-
-<img width="4111" height="1270" alt="image" src="https://github.com/user-attachments/assets/791b172b-8a35-4b39-8470-c47d323bee05" />
-
-<img width="3448" height="1817" alt="image" src="https://github.com/user-attachments/assets/10c695cb-3b92-4891-abd1-0cad5df408ba" />
+This is the REST → gRPC bridge layer. It receives search queries from the React UI via HTTP POST, forwards them to the Python Query Processor via gRPC, and streams results back to the UI using Server-Sent Events (SSE).
 
 ## Architecture Flow
 
@@ -30,7 +26,7 @@ Streams back: STATUS → CHUNK → DONE (SSE)
 - **Docker Desktop** — running with containers: `milvus-standalone`, `etcd`, `neo4j`, `minio`
 - **Python Query Processor** — running on `localhost:50051`
 
-## Quick Start (instructions to run locally)
+## Quick Start
 
 ### 1. Start required services
 
@@ -44,10 +40,7 @@ Verify they're up:
 docker compose ps
 ```
 
-[run ingestion_pipeline](ingestion_pipeline/README.md)
-
 ### 2. Start the Python Query Processor
-[query_processor](query_processor/README.md)
 
 ```powershell
 cd query_processor
@@ -59,7 +52,6 @@ python main.py
 Leave this terminal running.
 
 ### 3. Generate proto stubs & run Spring Boot
-[orchestration_layer](orchestration_layer/README.md)
 
 In a **new terminal**:
 
@@ -70,7 +62,6 @@ mvnw spring-boot:run
 ```
 
 ### 4. (Optional) Start the React UI
-[web_search_client](web_search_client/README.md)
 
 ```powershell
 cd web_search_client
@@ -112,16 +103,3 @@ Set these in `.env` or environment variables:
 - **`Connection refused: localhost:50051`** → The Python Query Processor isn't running. Start it first.
 - **`Fail connecting to Milvus`** → Run `docker compose up milvus-standalone -d` and wait 10 seconds.
 - **Proto compilation errors** → Ensure `src/main/proto/query.proto` exists (it mirrors `query_processor/proto/query.proto`).
-
-## How to run in docker
-# 1. Build all images
-docker compose build
-
-# 2. Start everything
-docker compose up -d
-
-# 3. Watch the ingestion pipeline complete
-docker compose logs -f ai-ingestion
-
-# 4. Once it finishes, verify all services
-docker compose ps

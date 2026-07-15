@@ -1,30 +1,39 @@
-# Use the official lightweight Python image
+# ============================================
+# Query Processor — Production Dockerfile
+# ============================================
+
 FROM python:3.10-slim
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Set the working directory
 WORKDIR /app
 
-# 1. Create a virtual environment
-RUN python -m venv /opt/venv
+# Install system deps for sentence-transformers
+RUN apt-get update && apt-get install -y --no-install-recommends gcc build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
-# 2. Activate the virtual environment
+# Virtual env
+RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# 3. Copy requirements first
+# Copy and install deps
 COPY requirements.txt .
-
-# 4. Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Copy application code
+# Copy all source code (including proto)
 COPY . .
 
-# Expose port if your query processor runs as an API (e.g., FastAPI/Flask)
-# EXPOSE 8000
+# Generate gRPC stubs from proto during build
+RUN python -m grpc_tools.protoc -I proto --python_out=app --grpc_python_out=app proto/query.proto
 
-# Default command
+# Expose gRPC port
+EXPOSE 50051
+
+# Default env overrides for Docker networking
+ENV MILVUS_HOST=milvus-standalone
+ENV NEO4J_URI=bolt://neo4j:7687
+ENV MINIO_ENDPOINT=http://minio:9000
+
+WORKDIR /app/app
 CMD ["python", "main.py"]

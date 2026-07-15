@@ -1,31 +1,31 @@
-# Use the official lightweight Python image
+# ============================================
+# Ingestion Pipeline — Production Dockerfile
+# ============================================
+
 FROM python:3.10-slim
 
-# Set environment variables to prevent Python from writing .pyc files and buffering logs
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# 1. Create a virtual environment
-RUN python -m venv /opt/venv
+# Install system deps for sentence-transformers
+RUN apt-get update && apt-get install -y --no-install-recommends gcc build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
-# 2. Activate the virtual environment (add to PATH)
+# Virtual env
+RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# 3. Install system dependencies (if needed for specific python packages like gcc)
-# RUN apt-get update && apt-get install -y --no-install-recommends gcc
-
-# 4. Copy only requirements first (for Docker layer caching)
+# Copy and install deps
 COPY requirements.txt .
-
-# 5. Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. Copy the rest of the application code
+# Copy app code
 COPY . .
 
-# Define the default command to run the pipeline
-# Assuming your main script is named main.py
-CMD ["python", "main.py"]
+# Entrypoint: runs upload, main, then index in sequence
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
