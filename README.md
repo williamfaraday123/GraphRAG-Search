@@ -114,14 +114,59 @@ Set these in `.env` or environment variables:
 - **Proto compilation errors** → Ensure `src/main/proto/query.proto` exists (it mirrors `query_processor/proto/query.proto`).
 
 ## How to run in docker
-# 1. Build all images
+
+### Build React locally
+```powershell
+cd web_search_client
+npm install
+npm run build        # creates web_search_client/build/
+
+cd ..
+```
+### Build the fat JAR locally (includes proto stubs & React UI)
+```powershell
+# First, copy the React build into Spring Boot's static resources
+Copy-Item -Recurse web_search_client\build\* orchestration_layer\src\main\resources\static\ -Force
+
+# Then package everything into a single JAR
+cd orchestration_layer
+mvnw clean package -DskipTests
+```
+If error occurs due to stale .class files in target/
+```powershell
+# Clean the stale files and rebuild
+rm src\main\java\com\com -Recurse -Force
+mvnw clean package -DskipTests
+```
+
+### 1. Build all images
+```powershell
 docker compose build
+```
 
-# 2. Start everything
+### 2. Start everything
+```powershell
 docker compose up -d
+```
 
-# 3. Watch the ingestion pipeline complete
-docker compose logs -f ai-ingestion
+## Full Docker deployment (when Docker can pull images)
 
-# 4. Once it finishes, verify all services
-docker compose ps
+
+1. **Build everything locally:**
+   ```powershell
+   cd web_search_client && npm install && npm run build
+   Copy-Item -Recurse web_search_client\build\* orchestration_layer\src\main\resources\static\ -Force
+   cd orchestration_layer && mvnw clean package -DskipTests
+   cd ..
+   ```
+
+2. **Build and run all Docker services:**
+   ```powershell
+   docker compose build && docker compose up -d
+   ```
+
+3. **Monitor and verify:**
+   ```powershell
+   docker compose logs -f ai-ingestion
+   docker compose ps
+   ```

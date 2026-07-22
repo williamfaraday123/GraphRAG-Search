@@ -18,6 +18,19 @@ pip-delete-this-directory.txt
 # IDE
 .idea/
 .vscode/
+
+# Project files not needed for orchestration build
+volumes/
+diagrams/
+ingestion_pipeline/
+query_processor/
+web_search_client/node_modules/
+orchestration_layer/target/
+*.md
+*.tf
+*.yaml
+*.yml
+explain.txt
 *.swp
 *.swo
 
