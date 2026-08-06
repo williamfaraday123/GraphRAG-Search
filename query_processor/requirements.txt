@@ -10,6 +10,7 @@ langchain-openai
 langgraph
 python-dotenv
 pydantic
+torch==2.6.0+cpu
 sentence_transformers
 networkx
 boto3

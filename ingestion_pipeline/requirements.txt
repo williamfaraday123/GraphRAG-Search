@@ -22,6 +22,7 @@ neo4j>=5.0.0
 pymilvus>=2.5.0
 
 # Embedding Model (for index_to_milvus.py)
+torch==2.6.0+cpu
 sentence-transformers>=3.0.0
 
 # Environment Variables Management

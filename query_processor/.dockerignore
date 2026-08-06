@@ -1,7 +1,7 @@
 venv/
+torch_cache/
 __pycache__/
 *.pyc
 .env
 .gitignore
 README.md
-proto/

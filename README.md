@@ -158,11 +158,40 @@ docker compose up -d
    Copy-Item -Recurse web_search_client\build\* orchestration_layer\src\main\resources\static\ -Force
    cd orchestration_layer && mvnw clean package -DskipTests
    cd ..
+
+   # On your machine, pre-download Linux wheels for each Python image.
+   # The Dockerfiles copy wheel_cache/ and install from it offline.
+   cd ingestion_pipeline && venv\Scripts\activate
+   Remove-Item -Recurse -Force wheel_cache -ErrorAction SilentlyContinue
+
+   # 1. Download a Linux CPU torch wheel for the Docker image
+   pip download "torch==2.6.0+cpu" -d wheel_cache --platform linux_x86_64 --only-binary=:all: --python-version 312 --index-url https://download.pytorch.org/whl/cpu
+
+   # 2. Download everything else as Linux wheels
+   pip download -r requirements.txt -d wheel_cache --platform manylinux2014_x86_64 --only-binary=:all: --python-version 312 --extra-index-url https://download.pytorch.org/whl/cpu
+
+   cd ..\query_processor
+   Remove-Item -Recurse -Force wheel_cache -ErrorAction SilentlyContinue
+   pip download "torch==2.6.0+cpu" -d wheel_cache --platform linux_x86_64 --only-binary=:all: --python-version 312 --index-url https://download.pytorch.org/whl/cpu
+   pip download -r requirements.txt -d wheel_cache --platform manylinux2014_x86_64 --only-binary=:all: --python-version 312 --extra-index-url https://download.pytorch.org/whl/cpu
+
+   cd ..
+
+   # Check both Docker build contexts include their offline wheel folders
+   dir ingestion_pipeline\wheel_cache
+   dir query_processor\wheel_cache
+
+   docker compose build ingestion_pipeline query_processor
    ```
 
 2. **Build and run all Docker services:**
    ```powershell
    docker compose build && docker compose up -d
+   ```
+
+   ```powershell
+   # In China (override with Tsinghua mirror)
+   docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
    ```
 
 3. **Monitor and verify:**
