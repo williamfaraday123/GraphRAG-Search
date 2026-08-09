@@ -18,3 +18,4 @@ ingestion_pipeline/proto/
 volumes/
 
 .env
+ingestion_pipeline/raw_data/
