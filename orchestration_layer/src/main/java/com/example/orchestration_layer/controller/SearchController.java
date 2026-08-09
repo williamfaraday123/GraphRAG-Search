@@ -74,7 +74,7 @@ public class SearchController {
                         emitter.send(SseEmitter.event()
                                 .name("error")
                                 .data(Map.of("message", event.getMessage())));
-                        emitter.completeWithError(new RuntimeException(event.getMessage()));
+                        emitter.complete();
                     }
                 }
             } catch (IOException ex) {

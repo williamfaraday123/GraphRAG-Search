@@ -14,10 +14,12 @@ class GraphBuilder:
     def close(self):
         self.driver.close()
 
-    def ingest_nodes(self, nodes: List[Dict]):
+    def ingest_nodes(self, nodes: List[Dict], batch_size: int = 1000):
         """
         Creates nodes in Neo4j with label 'Chunk'.
         Uses MERGE to avoid duplicates if re-running.
+        Writes in batches so a single huge document can't hold the whole
+        node list in one transaction/network payload.
         """
         cypher = """
         UNWIND $nodes AS node
@@ -28,12 +30,16 @@ class GraphBuilder:
             c.total_chunks = node.total_chunks
         """
         with self.driver.session() as session:
-            session.run(cypher, nodes=nodes)
+            for i in range(0, len(nodes), batch_size):
+                batch = nodes[i:i + batch_size]
+                session.run(cypher, nodes=batch)
+                logger.info(f"Ingested nodes batch {i // batch_size + 1}: {min(i + batch_size, len(nodes))}/{len(nodes)}")
         logger.info(f"Ingested {len(nodes)} nodes into Neo4j.")
 
-    def ingest_edges(self, edges: List[Dict]):
+    def ingest_edges(self, edges: List[Dict], batch_size: int = 1000):
         """
         Creates relationships between existing nodes.
+        Writes in batches for the same reason as ingest_nodes.
         """
         cypher = """
         UNWIND $edges AS edge
@@ -44,7 +50,10 @@ class GraphBuilder:
             r.reason = edge.reason
         """
         with self.driver.session() as session:
-            session.run(cypher, edges=edges)
+            for i in range(0, len(edges), batch_size):
+                batch = edges[i:i + batch_size]
+                session.run(cypher, edges=batch)
+                logger.info(f"Ingested edges batch {i // batch_size + 1}: {min(i + batch_size, len(edges))}/{len(edges)}")
         logger.info(f"Ingested {len(edges)} edges into Neo4j.")
 
     def create_vector_index(self):

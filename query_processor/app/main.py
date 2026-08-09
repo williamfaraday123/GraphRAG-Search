@@ -2,6 +2,7 @@ import grpc
 from concurrent import futures
 import logging
 import os
+import traceback
 from typing import Iterator
 
 # Import generated gRPC code (generated via: grpc_tools.protoc)
@@ -49,47 +50,47 @@ class QueryProcessorServicer:
         2. LangGraph Iteration
         3. Streaming Response
         """
-        prompt = request.prompt
-        logger.info(f"Processing query: {prompt}")
-
-        # Yield Status: Retrieving
-        yield self._make_status("RETRIEVING", "Fetching vectors and graph relations...")
-
-        # 1. Hybrid Retrieval
-        
-        # This single call handles: Embedding -> Milvus Search -> Neo4j Search
-        retrieval_result = self.retriever.search(
-            query=prompt,
-            top_k=request.top_k,
-            collection_name="ai_docs" # Ensure this matches your Milvus collection name
-        )
-
-        if "error" in retrieval_result:
-            logger.error(f"Retrieval failed: {retrieval_result['error']}")
-            context.set_details(retrieval_result['error'])
-            context.set_code(grpc.StatusCode.INTERNAL)
-            return
-
-        chunks = retrieval_result['chunks']
-        relations = retrieval_result['relations']
-
-        logger.info(f"Retrieved {len(chunks)} vectors and {len(relations)} graph nodes")
-        # Yield Status: Iterating
-        yield self._make_status("ITERATING", "Running Pregel consensus engine...")
-
-        # 2. LangGraph Execution
-        initial_state = {
-            "query": prompt,
-            "initial_chunks": chunks,
-            "graph_relations": relations,
-            "refined_context": [],
-            "iteration_count": 0,
-            "messages": [],
-            "final_answer": "",
-            "graph_scores": {}
-        }
-
         try:
+            prompt = request.prompt
+            logger.info(f"Processing query: {prompt}")
+
+            # Yield Status: Retrieving
+            yield self._make_status("RETRIEVING", "Fetching vectors and graph relations...")
+
+            # 1. Hybrid Retrieval
+
+            # This single call handles: Embedding -> Milvus Search -> Neo4j Search
+            retrieval_result = self.retriever.search(
+                query=prompt,
+                top_k=request.top_k,
+                collection_name="ai_docs" # Ensure this matches your Milvus collection name
+            )
+
+            if "error" in retrieval_result:
+                logger.error(f"Retrieval failed: {retrieval_result['error']}")
+                context.set_details(retrieval_result['error'])
+                context.set_code(grpc.StatusCode.INTERNAL)
+                return
+
+            chunks = retrieval_result['chunks']
+            relations = retrieval_result['relations']
+
+            logger.info(f"Retrieved {len(chunks)} vectors and {len(relations)} graph nodes")
+            # Yield Status: Iterating
+            yield self._make_status("ITERATING", "Running Pregel consensus engine...")
+
+            # 2. LangGraph Execution
+            initial_state = {
+                "query": prompt,
+                "initial_chunks": chunks,
+                "graph_relations": relations,
+                "refined_context": [],
+                "iteration_count": 0,
+                "messages": [],
+                "final_answer": "",
+                "graph_scores": {}
+            }
+
             # Run the graph
             final_state = self.app_graph.invoke(initial_state)
             
@@ -109,12 +110,13 @@ class QueryProcessorServicer:
             # Final Metadata
             final_resp = SearchResponse()
             final_resp.answer.text = answer
-            final_resp.answer.sources = list(set([c['source'] for c in chunks if 'source' in c and c['source']]))
+            final_resp.answer.sources.extend(set(c['source'] for c in chunks if 'source' in c and c['source']))
             final_resp.answer.confidence_score = 0.95
             yield final_resp
 
         except Exception as e:
-            logger.error(f"Graph execution failed: {e}")
+            logger.error(f"Query processing failed: {e}")
+            logger.error(traceback.format_exc())
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
 
