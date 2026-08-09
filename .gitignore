@@ -19,3 +19,7 @@ volumes/
 
 .env
 ingestion_pipeline/raw_data/
+
+*.tar
+*.gz
+*.zip
