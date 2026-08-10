@@ -6,7 +6,6 @@ query_processor/app/services/__pycache__/
 query_processor/torch_cache/
 query_processor/wheel_cache/
 query_processor/$null
-query_processor/proto/
 
 ingestion_pipeline/venv/
 ingestion_pipeline/__pycache__/
@@ -18,6 +17,7 @@ ingestion_pipeline/proto/
 volumes/
 
 .env
+.env.prod
 ingestion_pipeline/raw_data/
 
 *.tar

@@ -1,0 +1,23 @@
+# ============================================
+# Ingestion Pipeline — Render Dockerfile
+# Unlike the local Dockerfile, Render's build environment has internet
+# access, so this installs directly from PyPI instead of a pre-downloaded
+# wheel_cache/ (which isn't committed to git and can't exist on a fresh clone).
+# ============================================
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+
+COPY . .
+
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

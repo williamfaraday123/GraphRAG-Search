@@ -1,0 +1,27 @@
+# ============================================
+# Orchestration Layer — Render Dockerfile
+# Unlike the local Dockerfile, this builds the jar itself instead of
+# expecting a pre-built target/*.jar (target/ isn't committed to git and
+# can't exist on a fresh clone).
+# ============================================
+
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /build
+
+# Cache dependencies separately from source changes
+COPY pom.xml .
+COPY .mvn .mvn
+COPY mvnw .
+RUN mvn -B dependency:go-offline
+
+COPY src src
+RUN mvn -B package -DskipTests
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+
+COPY --from=build /build/target/*.jar app.jar
+
+EXPOSE 8080
+
+ENTRYPOINT ["java", "-jar", "app.jar"]

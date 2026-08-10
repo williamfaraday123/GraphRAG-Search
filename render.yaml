@@ -1,0 +1,240 @@
+# ============================================
+# Render Blueprint
+# ============================================
+# Deploy: Render Dashboard -> New -> Blueprint -> select this repo.
+# Render reads this file and provisions every service below automatically.
+#
+# IMPORTANT — read before deploying:
+#
+# 1. COST / SIZE. This stack is heavy: Milvus + Neo4j + etcd + MinIO plus
+#    two Python services that load torch/sentence-transformers. The `plan:`
+#    values below (mostly `starter`) are a starting point, not a guarantee —
+#    Milvus and the two Python app services in particular may need a bigger
+#    plan to avoid OOM during startup (a local run of just the ingestion
+#    step peaked around 3.7GB RAM). Watch each service's metrics after
+#    first deploy and bump `plan:` if you see restarts/OOM kills.
+#
+# 2. SECRETS. Render Blueprints can't do docker-compose-style ${VAR}
+#    interpolation inside a value, and env vars aren't automatically shared
+#    across services except via `fromService` (host/port only). So:
+#      - NEO4J_PASSWORD and NEO4J_AUTH are both marked `sync: false` below —
+#        after the Blueprint creates the services, open the neo4j service in
+#        the Render dashboard and set NEO4J_AUTH to literally "neo4j/<the
+#        same password you put in NEO4J_PASSWORD>".
+#      - LLM_API_KEY (Groq by default) is also `sync: false` — set your real
+#        key on query_processor and ingestion_pipeline after creation.
+#    Shared, non-secret values (MinIO creds, Neo4j user) are defined once in
+#    the `render-shared-env` group below and attached to every service that
+#    needs them, so you only edit them in one place.
+#
+# 3. INGESTION IS A CRON JOB, NOT AUTO-RUN. `ingestion_pipeline` uses
+#    Render's cron job type so it doesn't run on every deploy. Its schedule
+#    below is set to once a year (effectively "never on its own") — trigger
+#    it manually from the Render dashboard ("Trigger Run") whenever you want
+#    to (re)ingest data, same as you'd run `docker compose up ingestion_pipeline`
+#    locally.
+#
+# 4. VERIFY BEFORE TRUSTING. Render's Blueprint schema has changed field
+#    names over time (e.g. `env:` vs `runtime:`). Render validates this file
+#    and shows errors *before* creating anything when you connect the repo —
+#    treat that validation step as the real source of truth, not this
+#    comment block.
+#
+# 5. LLM ENDPOINT. Defaults to DeepSeek's OpenAI-compatible API
+#    (deepseek-chat). LLM_API_KEY must be your ROTATED key (the original one
+#    that lived in .env.prod was purged from git history — never reuse it).
+#    Swap EDGE_MODEL_BASE_URL/EDGE_MODEL/LLM_API_KEY to any other
+#    OpenAI-compatible provider later — the code
+#    (ingestion_pipeline/edge_generator.py, query_processor/app/graph_engine.py)
+#    is provider-agnostic, so no code changes needed, just env vars.
+# ============================================
+
+envVarGroups:
+  - name: render-shared-env
+    envVars:
+      - key: MINIO_ROOT_USER
+        value: minioadmin
+      - key: MINIO_ROOT_PASSWORD
+        generateValue: true
+      - key: NEO4J_USER
+        value: neo4j
+      - key: EDGE_MODEL
+        value: deepseek-chat
+      - key: EDGE_MODEL_BASE_URL
+        value: https://api.deepseek.com
+      - key: LLM_API_KEY
+        sync: false # set your ROTATED DeepSeek key here after Blueprint creation — never commit it
+
+services:
+  # ============================================
+  # Infrastructure Layer (prebuilt public images, no build step)
+  # ============================================
+
+  - type: pserv
+    name: etcd
+    runtime: image
+    image:
+      url: gcr.io/etcd-development/etcd:v3.5.20
+    plan: starter
+    dockerCommand: >-
+      /usr/local/bin/etcd
+      --listen-client-urls=http://0.0.0.0:2379
+      --advertise-client-urls=http://etcd:2379
+    envVars:
+      - key: ETCD_AUTO_COMPACTION_MODE
+        value: revision
+      - key: ETCD_AUTO_COMPACTION_RETENTION
+        value: "1000"
+      - key: ETCD_QUOTA_BACKEND_BYTES
+        value: "4294967296"
+      - key: ETCD_SNAPSHOT_COUNT
+        value: "50000"
+    disk:
+      name: etcd-data
+      mountPath: /etcd
+      sizeGB: 2
+
+  - type: pserv
+    name: neo4j
+    runtime: image
+    image:
+      url: docker.io/library/neo4j:5
+    plan: starter
+    envVars:
+      - key: NEO4J_AUTH
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: dbms.security.procedures.unrestricted
+        value: "*"
+    disk:
+      name: neo4j-data
+      mountPath: /data
+      sizeGB: 5
+
+  - type: pserv
+    name: minio
+    runtime: image
+    image:
+      url: docker.io/library/minio/minio:latest
+    plan: starter
+    dockerCommand: server /minio_data --console-address ":9001"
+    envVars:
+      - fromGroup: render-shared-env
+    disk:
+      name: minio-data
+      mountPath: /minio_data
+      sizeGB: 5
+
+  - type: pserv
+    name: milvus-standalone
+    runtime: image
+    image:
+      url: docker.io/milvusdb/milvus:v2.5.9
+    plan: standard
+    dockerCommand: milvus run standalone
+    envVars:
+      - key: ETCD_ENDPOINTS
+        fromService:
+          name: etcd
+          type: pserv
+          property: hostport
+      - key: MINIO_ADDRESS
+        fromService:
+          name: minio
+          type: pserv
+          property: hostport
+    disk:
+      name: milvus-data
+      mountPath: /var/lib/milvus
+      sizeGB: 10
+
+  # ============================================
+  # Application Layer (built from this repo)
+  # ============================================
+
+  - type: cron
+    name: ingestion-pipeline
+    runtime: docker
+    dockerfilePath: ./ingestion_pipeline/Dockerfile.render
+    dockerContext: ./ingestion_pipeline
+    plan: standard
+    schedule: "0 0 1 1 *" # placeholder; trigger manually from the dashboard instead
+    envVars:
+      - fromGroup: render-shared-env
+      - key: MINIO_ENDPOINT
+        fromService:
+          name: minio
+          type: pserv
+          property: hostport
+        # NOTE: prefix with "http://" manually in the dashboard if Render
+        # gives a bare host:port — the app expects a full URL.
+      - key: NEO4J_URI
+        fromService:
+          name: neo4j
+          type: pserv
+          property: hostport
+        # NOTE: prefix with "bolt://" manually in the dashboard.
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: MILVUS_HOST
+        fromService:
+          name: milvus-standalone
+          type: pserv
+          property: host
+      - key: MILVUS_PORT
+        fromService:
+          name: milvus-standalone
+          type: pserv
+          property: port
+
+  - type: pserv
+    name: query-processor
+    runtime: docker
+    dockerfilePath: ./query_processor/Dockerfile.render
+    dockerContext: ./query_processor
+    plan: standard
+    envVars:
+      - fromGroup: render-shared-env
+      - key: MINIO_ENDPOINT
+        fromService:
+          name: minio
+          type: pserv
+          property: hostport
+      - key: NEO4J_URI
+        fromService:
+          name: neo4j
+          type: pserv
+          property: hostport
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: MILVUS_HOST
+        fromService:
+          name: milvus-standalone
+          type: pserv
+          property: host
+      - key: MILVUS_PORT
+        fromService:
+          name: milvus-standalone
+          type: pserv
+          property: port
+
+  - type: web
+    name: orchestration-layer
+    runtime: docker
+    dockerfilePath: ./orchestration_layer/Dockerfile.render
+    dockerContext: ./orchestration_layer
+    plan: starter
+    envVars:
+      - key: SERVER_PORT
+        value: "8080"
+      - key: GRPC_CLIENT_HOST
+        fromService:
+          name: query-processor
+          type: pserv
+          property: host
+      - key: GRPC_CLIENT_PORT
+        fromService:
+          name: query-processor
+          type: pserv
+          property: port
