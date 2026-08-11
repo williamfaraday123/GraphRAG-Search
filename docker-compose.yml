@@ -100,7 +100,7 @@ services:
   ingestion_pipeline:
     build:
       context: ./ingestion_pipeline
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.render
     container_name: ai-ingestion
     env_file:
       - .env
@@ -124,7 +124,7 @@ services:
   query_processor:
     build:
       context: ./query_processor
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.render
     container_name: ai-query-api
     env_file:
       - .env
@@ -152,7 +152,7 @@ services:
   orchestration_layer:
     build:
       context: ./orchestration_layer
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.render
     container_name: ai-orchestration
     ports:
       - "8080:8080"
