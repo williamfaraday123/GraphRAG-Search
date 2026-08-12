@@ -1,7 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './App.css';
 
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8080';
+// Empty string = relative URL, resolves against whatever host served this page.
+// Only needed as an absolute URL for `npm start` dev server (set REACT_APP_API_URL
+// in web_search_client/.env.local) since that runs on a different port than the API.
+const API_BASE = process.env.REACT_APP_API_URL || '';
 
 function App() {
   const [query, setQuery] = useState('');
