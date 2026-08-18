@@ -142,6 +142,49 @@ body {
 
 .status-icon { font-size: 1.2rem; }
 
+/* --- Agent Trace --- */
+.agent-trace {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  animation: fadeIn 0.3s ease;
+}
+
+.agent-trace-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.agent-trace-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+
+.agent-trace-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.85rem;
+  animation: fadeIn 0.25s ease;
+}
+
+.agent-trace-icon { font-size: 1rem; flex-shrink: 0; }
+
+.agent-trace-name {
+  color: var(--primary);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.agent-trace-detail {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- Error Bar --- */
 .error-bar {
   padding: 12px 16px;

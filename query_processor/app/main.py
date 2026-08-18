@@ -41,7 +41,7 @@ class QueryProcessorServicer:
             neo4j_password=NEO4J_PASSWORD,
             embedding_model="all-MiniLM-L6-v2" # Must match Milvus collection dimension
         )
-        self.app_graph = build_query_graph()
+        self.app_graph = build_query_graph(self.retriever)
 
     def StartProcessing(self, request, context) -> Iterator[SearchResponse]:
         """
@@ -54,63 +54,57 @@ class QueryProcessorServicer:
             prompt = request.prompt
             logger.info(f"Processing query: {prompt}")
 
-            # Yield Status: Retrieving
             yield self._make_status("RETRIEVING", "Fetching vectors and graph relations...")
 
-            # 1. Hybrid Retrieval
-
-            # This single call handles: Embedding -> Milvus Search -> Neo4j Search
-            retrieval_result = self.retriever.search(
-                query=prompt,
-                top_k=request.top_k,
-                collection_name="ai_docs" # Ensure this matches your Milvus collection name
-            )
-
-            if "error" in retrieval_result:
-                logger.error(f"Retrieval failed: {retrieval_result['error']}")
-                context.set_details(retrieval_result['error'])
-                context.set_code(grpc.StatusCode.INTERNAL)
-                return
-
-            chunks = retrieval_result['chunks']
-            relations = retrieval_result['relations']
-
-            logger.info(f"Retrieved {len(chunks)} vectors and {len(relations)} graph nodes")
-            # Yield Status: Iterating
-            yield self._make_status("ITERATING", "Running Pregel consensus engine...")
-
-            # 2. LangGraph Execution
             initial_state = {
                 "query": prompt,
-                "initial_chunks": chunks,
-                "graph_relations": relations,
+                "top_k": request.top_k or 5,
+                "all_chunks": [],
+                "all_relations": [],
                 "refined_context": [],
+                "search_queries": [],
                 "iteration_count": 0,
                 "messages": [],
                 "final_answer": "",
                 "graph_scores": {}
             }
 
-            # Run the graph
-            final_state = self.app_graph.invoke(initial_state)
-            
-            # Yield Status: Synthesizing
-            yield self._make_status("SYNTHESIZING", "Generating final answer...")
+            # Stream node-by-node instead of a single blocking invoke() so each
+            # agent's step (planner/retriever/analyst/synthesizer) can be surfaced
+            # to the UI as it happens, not just the three coarse pipeline stages.
+            state_acc = dict(initial_state)
+            iterating_announced = False
 
-            # 3. Stream the answer (Simulated streaming of the final text)
-            answer = final_state["final_answer"]
+            for step in self.app_graph.stream(initial_state, stream_mode="updates"):
+                for node_name, update in step.items():
+                    state_acc.update(update)
+
+                    detail = update["messages"][-1] if update.get("messages") else ""
+                    yield self._make_agent_step(node_name, detail)
+
+                    if node_name == "retriever" and not iterating_announced:
+                        yield self._make_status("ITERATING", "Running Pregel consensus engine...")
+                        iterating_announced = True
+                    elif node_name == "analyst" and update.get("search_queries"):
+                        yield self._make_status("RETRIEVING", "Gap identified — running another retrieval round...")
+                    elif node_name == "synthesizer":
+                        yield self._make_status("SYNTHESIZING", "Generating final answer...")
+
+            answer = state_acc.get("final_answer", "")
+
+            # Stream the answer (Simulated streaming of the final text)
             words = answer.split()
-            
             for word in words:
                 chunk_resp = SearchResponse()
                 chunk_resp.chunk.content = word + " "
-                # Add source metadata if available
                 yield chunk_resp
-            
+
             # Final Metadata
             final_resp = SearchResponse()
             final_resp.answer.text = answer
-            final_resp.answer.sources.extend(set(c['source'] for c in chunks if 'source' in c and c['source']))
+            final_resp.answer.sources.extend(
+                set(c['source'] for c in state_acc.get("all_chunks", []) if c.get('source'))
+            )
             final_resp.answer.confidence_score = 0.95
             yield final_resp
 
@@ -124,6 +118,12 @@ class QueryProcessorServicer:
         resp = SearchResponse()
         resp.status.stage = stage
         resp.status.message = msg
+        return resp
+
+    def _make_agent_step(self, agent: str, detail: str):
+        resp = SearchResponse()
+        resp.agent_step.agent = agent
+        resp.agent_step.detail = detail
         return resp
 
 def serve():

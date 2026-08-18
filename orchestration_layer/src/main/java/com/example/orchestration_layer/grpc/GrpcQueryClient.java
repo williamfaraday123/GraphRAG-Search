@@ -78,6 +78,9 @@ public class GrpcQueryClient {
                             a.getSourcesList(),
                             a.getConfidenceScore()
                     ));
+                } else if (response.hasAgentStep()) {
+                    var s = response.getAgentStep();
+                    eventConsumer.accept(SearchEvent.agentStep(s.getAgent(), s.getDetail()));
                 }
             }
 

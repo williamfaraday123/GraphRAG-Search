@@ -8,7 +8,7 @@ import java.util.List;
 public class SearchEvent {
 
     public enum EventType {
-        STATUS, CHUNK, DONE, ERROR
+        STATUS, CHUNK, DONE, ERROR, AGENT_STEP
     }
 
     private EventType type;
@@ -19,6 +19,8 @@ public class SearchEvent {
     private String answer;        // for DONE: final full answer
     private List<String> sources; // for DONE: citation sources
     private double confidence;    // for DONE: confidence score
+    private String agentName;     // for AGENT_STEP: which agent acted (planner/retriever/analyst/synthesizer)
+    private String agentDetail;   // for AGENT_STEP: what it did/decided
 
     public SearchEvent() {}
 
@@ -55,6 +57,14 @@ public class SearchEvent {
         return e;
     }
 
+    public static SearchEvent agentStep(String agentName, String detail) {
+        var e = new SearchEvent();
+        e.type = EventType.AGENT_STEP;
+        e.agentName = agentName;
+        e.agentDetail = detail;
+        return e;
+    }
+
     // --- Getters / Setters ---
     public EventType getType() { return type; }
     public void setType(EventType type) { this.type = type; }
@@ -72,4 +82,8 @@ public class SearchEvent {
     public void setSources(List<String> sources) { this.sources = sources; }
     public double getConfidence() { return confidence; }
     public void setConfidence(double confidence) { this.confidence = confidence; }
+    public String getAgentName() { return agentName; }
+    public void setAgentName(String agentName) { this.agentName = agentName; }
+    public String getAgentDetail() { return agentDetail; }
+    public void setAgentDetail(String agentDetail) { this.agentDetail = agentDetail; }
 }

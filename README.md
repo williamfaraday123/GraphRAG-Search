@@ -196,6 +196,13 @@ docker compose up -d
 
 3. **Monitor and verify:**
    ```powershell
-   docker compose logs -f ai-ingestion
+   docker compose logs -f ingestion_pipeline
+   docker compose logs -f query_processor
+    docker compose logs -f orchestration_layer
    docker compose ps
+
+   # If you see Created instead of Up, start them:
+   docker compose start
+
+   
    ```

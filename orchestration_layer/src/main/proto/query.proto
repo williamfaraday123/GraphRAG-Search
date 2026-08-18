@@ -20,7 +20,15 @@ message SearchResponse {
     ProcessingStatus status = 1;
     StreamChunk chunk = 2;
     FinalAnswer answer = 3;
+    AgentStep agent_step = 4;
   }
+}
+
+// Emitted once per LangGraph node transition (planner/retriever/analyst/synthesizer)
+// so the UI can show which agent is acting and why, instead of only coarse status stages.
+message AgentStep {
+  string agent = 1;   // "planner" | "retriever" | "analyst" | "synthesizer"
+  string detail = 2;  // human-readable summary of what the agent just did/decided
 }
 
 message ProcessingStatus {

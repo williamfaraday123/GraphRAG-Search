@@ -60,6 +60,12 @@ public class SearchController {
                                     "content", event.getContent(),
                                     "sourceId", event.getSourceId() != null ? event.getSourceId() : ""
                             )));
+                    case AGENT_STEP -> emitter.send(SseEmitter.event()
+                            .name("agent_step")
+                            .data(Map.of(
+                                    "agent", event.getAgentName(),
+                                    "detail", event.getAgentDetail()
+                            )));
                     case DONE -> {
                         emitter.send(SseEmitter.event()
                                 .name("done")

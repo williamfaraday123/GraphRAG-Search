@@ -9,6 +9,7 @@ const API_BASE = process.env.REACT_APP_API_URL || '';
 function App() {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState(null);
+  const [agentSteps, setAgentSteps] = useState([]);
   const [streamedText, setStreamedText] = useState('');
   const [sources, setSources] = useState([]);
   const [confidence, setConfidence] = useState(null);
@@ -26,6 +27,7 @@ function App() {
 
   const resetState = useCallback(() => {
     setStatus(null);
+    setAgentSteps([]);
     setStreamedText('');
     setSources([]);
     setConfidence(null);
@@ -90,6 +92,9 @@ function App() {
       case 'status':
         setStatus({ stage: data.stage, message: data.message });
         break;
+      case 'agent_step':
+        setAgentSteps((prev) => [...prev, { agent: data.agent, detail: data.detail }]);
+        break;
       case 'chunk':
         setStreamedText((prev) => prev + data.content);
         if (resultRef.current) resultRef.current.scrollTop = resultRef.current.scrollHeight;
@@ -110,8 +115,15 @@ function App() {
     }
   };
 
+  const agentMeta = {
+    planner: { icon: '\uD83E\uDDED', label: 'Planner' },
+    retriever: { icon: '\uD83D\uDD0D', label: 'Retriever' },
+    analyst: { icon: '\uD83E\uDDD0', label: 'Critic' },
+    synthesizer: { icon: '\u270D\uFE0F', label: 'Synthesizer' },
+  };
+
   const stageIcons = {
-    RETRIEVING: '\uD83D\uDD0D',    // 🔍
+    RETRIEVING: '\uD83D\uDD0D',    //🔍
     ITERATING: '\uD83D\uDD04',     // 🔄
     SYNTHESIZING: '\u2728',        // ✨
   };
@@ -162,6 +174,24 @@ function App() {
           <span className="status-text">
             <strong>{status.stage}</strong> — {status.message}
           </span>
+        </div>
+      )}
+
+      {agentSteps.length > 0 && (
+        <div className="agent-trace">
+          <h3 className="agent-trace-label">Agent Trace</h3>
+          <ul className="agent-trace-list">
+            {agentSteps.map((step, i) => {
+              const meta = agentMeta[step.agent] || { icon: '🤖', label: step.agent };
+              return (
+                <li key={i} className="agent-trace-item">
+                  <span className="agent-trace-icon">{meta.icon}</span>
+                  <span className="agent-trace-name">{meta.label}</span>
+                  <span className="agent-trace-detail">{step.detail}</span>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
 
