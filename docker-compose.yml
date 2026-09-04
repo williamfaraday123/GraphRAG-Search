@@ -108,8 +108,11 @@ services:
       - MINIO_ENDPOINT=http://minio:9000
       - NEO4J_URI=bolt://neo4j:7687
       - MILVUS_HOST=milvus-standalone
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_DISABLE_XET=1
     volumes:
       - ./ingestion_pipeline/raw_data:/app/raw_data
+      - hf_cache:/app/.cache/huggingface
     depends_on:
       milvus-standalone:
         condition: service_started
@@ -135,6 +138,10 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123}
       - MINIO_ENDPOINT=http://minio:9000
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_DISABLE_XET=1
+    volumes:
+      - hf_cache:/app/.cache/huggingface
     ports:
       - "50051:50051"
     depends_on:
@@ -176,6 +183,8 @@ volumes:
   neo4j_logs:
   minio_data:
   etcd_data:
+  hf_cache: # Shared Hugging Face model cache (all-MiniLM-L6-v2) — avoids
+            # re-downloading the embedding model on every container recreate.
 
 # ============================================
 # Network

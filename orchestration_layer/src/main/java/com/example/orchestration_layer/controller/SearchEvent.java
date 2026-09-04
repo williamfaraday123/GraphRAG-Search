@@ -1,6 +1,7 @@
 package com.example.orchestration_layer.controller;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * SSE event payload sent from the server to the React UI.
@@ -19,6 +20,7 @@ public class SearchEvent {
     private String answer;        // for DONE: final full answer
     private List<String> sources; // for DONE: citation sources
     private double confidence;    // for DONE: confidence score
+    private List<Map<String, Object>> chunks; // for DONE: ranked evidence chunks
     private String agentName;     // for AGENT_STEP: which agent acted (planner/retriever/analyst/synthesizer)
     private String agentDetail;   // for AGENT_STEP: what it did/decided
 
@@ -41,12 +43,14 @@ public class SearchEvent {
         return e;
     }
 
-    public static SearchEvent done(String answer, List<String> sources, double confidence) {
+    public static SearchEvent done(String answer, List<String> sources, double confidence,
+                                    List<Map<String, Object>> chunks) {
         var e = new SearchEvent();
         e.type = EventType.DONE;
         e.answer = answer;
         e.sources = sources;
         e.confidence = confidence;
+        e.chunks = chunks;
         return e;
     }
 
@@ -82,6 +86,8 @@ public class SearchEvent {
     public void setSources(List<String> sources) { this.sources = sources; }
     public double getConfidence() { return confidence; }
     public void setConfidence(double confidence) { this.confidence = confidence; }
+    public List<Map<String, Object>> getChunks() { return chunks; }
+    public void setChunks(List<Map<String, Object>> chunks) { this.chunks = chunks; }
     public String getAgentName() { return agentName; }
     public void setAgentName(String agentName) { this.agentName = agentName; }
     public String getAgentDetail() { return agentDetail; }

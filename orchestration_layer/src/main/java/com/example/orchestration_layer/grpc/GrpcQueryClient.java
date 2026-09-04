@@ -10,6 +10,9 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -26,6 +29,7 @@ public class GrpcQueryClient {
     private final int grpcPort;
     private io.grpc.ManagedChannel channel;
     private QueryProcessorServiceGrpc.QueryProcessorServiceStub asyncStub;
+    private QueryProcessorServiceGrpc.QueryProcessorServiceBlockingStub blockingStub;
 
     public GrpcQueryClient(
             @Value("${grpc.client.host:localhost}") String grpcHost,
@@ -41,6 +45,7 @@ public class GrpcQueryClient {
                 .usePlaintext()
                 .build();
         asyncStub = QueryProcessorServiceGrpc.newStub(channel);
+        blockingStub = QueryProcessorServiceGrpc.newBlockingStub(channel);
         log.info("gRPC client connected to {}:{}", grpcHost, grpcPort);
     }
 
@@ -73,10 +78,22 @@ public class GrpcQueryClient {
                     eventConsumer.accept(SearchEvent.chunk(c.getContent(), c.getSourceId()));
                 } else if (response.hasAnswer()) {
                     var a = response.getAnswer();
+                    List<Map<String, Object>> chunks = new ArrayList<>();
+                    for (var c : a.getChunksList()) {
+                        chunks.add(Map.of(
+                                "chunkId", c.getChunkId(),
+                                "content", c.getContent(),
+                                "source", c.getSource(),
+                                "milvusScore", c.getMilvusScore(),
+                                "pagerankScore", c.getPagerankScore(),
+                                "hybridScore", c.getHybridScore()
+                        ));
+                    }
                     eventConsumer.accept(SearchEvent.done(
                             a.getText(),
                             a.getSourcesList(),
-                            a.getConfidenceScore()
+                            a.getConfidenceScore(),
+                            chunks
                     ));
                 } else if (response.hasAgentStep()) {
                     var s = response.getAgentStep();
@@ -95,5 +112,25 @@ public class GrpcQueryClient {
                 log.info("gRPC stream completed");
             }
         });
+    }
+
+    /**
+     * Fetches the full source document for one evidence chunk from object storage,
+     * via the Query Processor — the browser never talks to MinIO directly.
+     */
+    public String getChunkSource(String source) {
+        var request = QueryProto.ChunkSourceRequest.newBuilder()
+                .setSource(source)
+                .build();
+
+        var response = blockingStub
+                .withDeadlineAfter(15, TimeUnit.SECONDS)
+                .getChunkSource(request);
+
+        if (!response.getFound()) {
+            throw new RuntimeException(
+                    response.getError().isEmpty() ? "Source not found" : response.getError());
+        }
+        return response.getContent();
     }
 }

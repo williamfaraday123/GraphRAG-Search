@@ -12,6 +12,9 @@ function App() {
   const [agentSteps, setAgentSteps] = useState([]);
   const [streamedText, setStreamedText] = useState('');
   const [sources, setSources] = useState([]);
+  const [chunks, setChunks] = useState([]);
+  const [expandedChunks, setExpandedChunks] = useState(new Set());
+  const [sourceCache, setSourceCache] = useState({}); // uri -> { loading, content, error }
   const [confidence, setConfidence] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -30,6 +33,9 @@ function App() {
     setAgentSteps([]);
     setStreamedText('');
     setSources([]);
+    setChunks([]);
+    setExpandedChunks(new Set());
+    setSourceCache({});
     setConfidence(null);
     setError(null);
     setDone(false);
@@ -104,6 +110,7 @@ function App() {
         setStatus(null);
         setIsLoading(false);
         setSources(data.sources || []);
+        setChunks(data.chunks || []);
         setConfidence(data.confidence);
         break;
       case 'error':
@@ -114,6 +121,43 @@ function App() {
         break;
     }
   };
+
+  const fetchChunkSource = useCallback((uri) => {
+    setSourceCache((prev) => ({ ...prev, [uri]: { loading: true, content: null, error: null } }));
+    fetch(`${API_BASE}/api/v1/chunk-source?uri=${encodeURIComponent(uri)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        setSourceCache((prev) => ({
+          ...prev,
+          [uri]: data.found
+            ? { loading: false, content: data.content, error: null }
+            : { loading: false, content: null, error: data.error || 'Source not found' },
+        }));
+      })
+      .catch((err) => {
+        setSourceCache((prev) => ({ ...prev, [uri]: { loading: false, content: null, error: err.message } }));
+      });
+  }, []);
+
+  const toggleChunkSource = useCallback((chunk, idx) => {
+    setExpandedChunks((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx); else next.add(idx);
+      return next;
+    });
+    if (chunk.source && !sourceCache[chunk.source]) {
+      fetchChunkSource(chunk.source);
+    }
+  }, [sourceCache, fetchChunkSource]);
+
+  const formatSourceLabel = (source) => {
+    if (!source) return 'Unknown source';
+    return source.startsWith('s3://') ? source.slice('s3://'.length) : source;
+  };
+
+  const topAuthorityIndex = chunks.length > 0
+    ? chunks.reduce((best, c, i, arr) => (c.pagerankScore > arr[best].pagerankScore ? i : best), 0)
+    : -1;
 
   const agentMeta = {
     planner: { icon: '\uD83E\uDDED', label: 'Planner' },
@@ -216,6 +260,50 @@ function App() {
               <span className="confidence-badge">
                 Confidence: {(confidence * 100).toFixed(0)}%
               </span>
+            </div>
+          )}
+
+          {done && chunks.length > 0 && (
+            <div className="evidence-section">
+              <h3 className="evidence-label">Evidence ({chunks.length} chunks)</h3>
+              <ul className="evidence-list">
+                {chunks.map((c, i) => {
+                  const cached = c.source ? sourceCache[c.source] : null;
+                  const isExpanded = expandedChunks.has(i);
+                  return (
+                    <li key={c.chunkId || i} className="evidence-item">
+                      <div className="evidence-header">
+                        {i === topAuthorityIndex && (
+                          <span className="evidence-badge">🏆 Top Authority</span>
+                        )}
+                        <span className="evidence-source">{formatSourceLabel(c.source)}</span>
+                      </div>
+                      <p className="evidence-snippet">{c.content}</p>
+                      <div className="evidence-scores">
+                        <span className="score-pill score-semantic">Semantic {Math.round((c.milvusScore || 0) * 100)}%</span>
+                        <span className="score-pill score-authority">Authority {Math.round((c.pagerankScore || 0) * 100)}%</span>
+                        <span className="score-pill score-hybrid">Hybrid {Math.round((c.hybridScore || 0) * 100)}%</span>
+                      </div>
+                      {c.source && (
+                        <button
+                          type="button"
+                          className="evidence-toggle"
+                          onClick={() => toggleChunkSource(c, i)}
+                        >
+                          {isExpanded ? 'Hide full source ▲' : 'View full source ▼'}
+                        </button>
+                      )}
+                      {isExpanded && (
+                        <div className="evidence-full-source">
+                          {cached?.loading && <span className="evidence-loading">Loading…</span>}
+                          {cached?.error && <span className="evidence-error">⚠️ {cached.error}</span>}
+                          {cached?.content && <pre className="evidence-full-text">{cached.content}</pre>}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
             </div>
           )}
 

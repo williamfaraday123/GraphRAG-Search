@@ -7,6 +7,8 @@ option java_outer_classname = "QueryProto";
 
 service QueryProcessorService {
   rpc StartProcessing (SearchRequest) returns (stream SearchResponse);
+  // Fetches the full source document for one retrieved chunk from object storage
+  rpc GetChunkSource (ChunkSourceRequest) returns (ChunkSourceResponse);
 }
 
 message SearchRequest {
@@ -45,4 +47,25 @@ message FinalAnswer {
   string text = 1;
   repeated string sources = 2;
   float confidence_score = 3;
+  repeated ChunkInfo chunks = 4; // Ranked evidence chunks (highest hybrid_score first)
+}
+
+// One retrieved-and-ranked chunk, surfaced to the UI as "Evidence".
+message ChunkInfo {
+  string chunk_id = 1;
+  string content = 2;        // chunk text snippet
+  string source = 3;         // raw object-storage URI, e.g. s3://rag-datasets/file.txt
+  float milvus_score = 4;    // semantic similarity (normalized 0-1)
+  float pagerank_score = 5;  // graph authority (normalized 0-1)
+  float hybrid_score = 6;    // 0.6 * milvus_score + 0.4 * pagerank_score
+}
+
+message ChunkSourceRequest {
+  string source = 1; // raw object-storage URI, e.g. s3://rag-datasets/file.txt
+}
+
+message ChunkSourceResponse {
+  bool found = 1;
+  string content = 2;
+  string error = 3;
 }

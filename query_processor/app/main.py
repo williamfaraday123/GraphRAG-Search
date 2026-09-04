@@ -23,6 +23,8 @@ FinalAnswer = query_pb2.FinalAnswer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+MAX_EVIDENCE_CHUNKS = 8
+
 class QueryProcessorServicer:
     def __init__(self):
         # config — defaults assume Docker Compose with port mapping; override in .env for custom setups
@@ -106,6 +108,17 @@ class QueryProcessorServicer:
                 set(c['source'] for c in state_acc.get("all_chunks", []) if c.get('source'))
             )
             final_resp.answer.confidence_score = 0.95
+
+            # Ranked evidence chunks for the UI (already sorted by hybrid_score, highest first)
+            for c in state_acc.get("refined_context", [])[:MAX_EVIDENCE_CHUNKS]:
+                chunk_info = final_resp.answer.chunks.add()
+                chunk_info.chunk_id = c.get("id") or ""
+                chunk_info.content = c.get("content") or ""
+                chunk_info.source = c.get("source") or ""
+                chunk_info.milvus_score = c.get("milvus_score", 0.0)
+                chunk_info.pagerank_score = c.get("pagerank_score", 0.0)
+                chunk_info.hybrid_score = c.get("hybrid_score", 0.0)
+
             yield final_resp
 
         except Exception as e:
@@ -113,6 +126,23 @@ class QueryProcessorServicer:
             logger.error(traceback.format_exc())
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
+
+    def GetChunkSource(self, request, context):
+        """
+        Unary RPC: fetches the full source document for one chunk from object
+        storage, so the UI can offer "view full source" without MinIO ever
+        being exposed to the browser directly.
+        """
+        resp = query_pb2.ChunkSourceResponse()
+        try:
+            content = self.retriever.object_storage.fetch_file_content(request.source)
+            resp.found = True
+            resp.content = content
+        except Exception as e:
+            logger.warning(f"GetChunkSource failed for '{request.source}': {e}")
+            resp.found = False
+            resp.error = str(e)
+        return resp
 
     def _make_status(self, stage: str, msg: str):
         resp = SearchResponse()

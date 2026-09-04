@@ -72,7 +72,8 @@ public class SearchController {
                                 .data(Map.of(
                                         "answer", event.getAnswer(),
                                         "sources", event.getSources(),
-                                        "confidence", event.getConfidence()
+                                        "confidence", event.getConfidence(),
+                                        "chunks", event.getChunks()
                                 )));
                         emitter.complete();
                     }
@@ -94,6 +95,22 @@ public class SearchController {
         emitter.onError(ex -> log.error("SSE stream error: {}", ex.getMessage()));
 
         return emitter;
+    }
+
+    /**
+     * GET /api/v1/chunk-source?uri=s3://rag-datasets/file.txt
+     * Proxies a full source-document fetch through the Query Processor so the
+     * browser never needs direct access to MinIO/object storage.
+     */
+    @GetMapping("/chunk-source")
+    public Map<String, Object> chunkSource(@RequestParam String uri) {
+        try {
+            String content = grpcClient.getChunkSource(uri);
+            return Map.of("found", true, "content", content);
+        } catch (Exception ex) {
+            log.warn("chunk-source fetch failed for '{}': {}", uri, ex.getMessage());
+            return Map.of("found", false, "error", ex.getMessage() != null ? ex.getMessage() : "Failed to fetch source");
+        }
     }
 
     /** Health-check endpoint */
