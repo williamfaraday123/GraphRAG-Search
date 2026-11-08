@@ -166,17 +166,74 @@ body {
 .upload-success { color: var(--success); }
 
 .uploaded-files { margin-top: 16px; }
-.uploaded-files h3 { margin-bottom: 6px; color: var(--text-muted); font-size: 0.8rem; }
+.uploaded-files h3, .files-heading { color: var(--text-muted); font-size: 0.8rem; font-weight: 700; }
 .uploaded-files ul { list-style: none; }
 .uploaded-files li {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 10px;
   padding: 7px 0;
   border-top: 1px solid var(--border);
   font-size: 0.82rem;
 }
-.uploaded-files li span:last-child { color: var(--success); white-space: nowrap; }
+
+.files-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.file-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+.file-check input { accent-color: var(--primary); width: 15px; height: 15px; flex-shrink: 0; cursor: pointer; }
+.file-name { overflow-wrap: anywhere; }
+.file-status { color: var(--success); white-space: nowrap; }
+
+.file-actions { display: flex; gap: 6px; }
+.file-action {
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.file-action:hover:not(:disabled) { background: var(--surface-hover); }
+.file-action:disabled { opacity: 0.45; cursor: not-allowed; }
+.file-action-danger { color: var(--error); border-color: rgba(255, 107, 107, 0.4); }
+
+.file-scope { margin-top: 8px; color: var(--text-muted); font-size: 0.78rem; }
+
+.file-preview {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.file-preview-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.file-preview-item + .file-preview-item { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.file-preview-item h4 { margin-bottom: 6px; font-size: 0.82rem; overflow-wrap: anywhere; }
+.file-preview-text {
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
 
 /* --- Search Bar --- */
 .search-form { margin-bottom: 24px; }

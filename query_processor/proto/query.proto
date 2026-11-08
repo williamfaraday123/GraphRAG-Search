@@ -11,6 +11,10 @@ service QueryProcessorService {
   rpc UploadCorpusFile (UploadCorpusFileRequest) returns (UploadCorpusFileResponse);
   // Lists indexed files in a corpus
   rpc ListCorpusFiles (ListCorpusFilesRequest) returns (ListCorpusFilesResponse);
+  // Returns one uploaded file's full text, for preview
+  rpc GetCorpusFile (CorpusFileRequest) returns (GetCorpusFileResponse);
+  // Removes one uploaded file from object storage, the graph and the vector index
+  rpc DeleteCorpusFile (CorpusFileRequest) returns (DeleteCorpusFileResponse);
 }
 
 message SearchRequest {
@@ -18,6 +22,7 @@ message SearchRequest {
   int32 top_k = 2;
   bool use_graph_refinement = 3;
   string corpus_id = 4; // "wiki" or an isolated upload workspace UUID
+  repeated string file_ids = 5; // restrict an upload-corpus search to these files; empty = all
 }
 
 message SearchResponse {
@@ -98,4 +103,21 @@ message CorpusFile {
 
 message ListCorpusFilesResponse {
   repeated CorpusFile files = 1;
+}
+
+message CorpusFileRequest {
+  string corpus_id = 1;
+  string file_id = 2;
+}
+
+message GetCorpusFileResponse {
+  bool found = 1;
+  string filename = 2;
+  string content = 3;
+  string error = 4;
+}
+
+message DeleteCorpusFileResponse {
+  bool success = 1;
+  string message = 2;
 }

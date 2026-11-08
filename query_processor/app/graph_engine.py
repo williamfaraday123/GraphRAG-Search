@@ -17,6 +17,7 @@ class AgentState(TypedDict):
     query: str
     top_k: int
     corpus_id: str
+    file_ids: List[str]           # Upload workspaces: restrict retrieval to these files (empty = all)
     all_chunks: List[dict]        # Chunks accumulated across every retrieval round (deduped by id)
     all_relations: List[dict]     # Graph edges accumulated across every retrieval round (deduped)
     refined_context: List[dict]   # The current re-ranked list of chunks ready for LLM
@@ -164,6 +165,7 @@ def make_retrieve_context_node(retriever: HybridRetriever):
                 query=q,
                 top_k=state.get("top_k") or 5,
                 corpus_id=state.get("corpus_id") or "wiki",
+                file_ids=state.get("file_ids") or None,
             )
             new_chunks.extend(result.get("chunks", []))
             new_relations.extend(result.get("relations", []))

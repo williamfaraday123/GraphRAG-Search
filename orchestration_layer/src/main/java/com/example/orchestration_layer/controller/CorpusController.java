@@ -88,17 +88,43 @@ public class CorpusController {
         return Map.of("files", results);
     }
 
+    /** Full text of one uploaded file, for the preview panel. */
+    @GetMapping("/{corpusId}/files/{fileId}")
+    public Map<String, String> getFile(@PathVariable String corpusId, @PathVariable String fileId) {
+        String validFileId = validateUuid(fileId, "file ID");
+        var response = grpcClient.getCorpusFile(validateCorpusId(corpusId), validFileId);
+        if (!response.getFound()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                    response.getError().isEmpty() ? "File not found" : response.getError());
+        }
+        return Map.of("fileId", validFileId, "filename", response.getFilename(), "content", response.getContent());
+    }
+
+    /** Removes one uploaded file from the workspace (object storage, graph and vector index). */
+    @DeleteMapping("/{corpusId}/files/{fileId}")
+    public Map<String, Object> deleteFile(@PathVariable String corpusId, @PathVariable String fileId) {
+        var response = grpcClient.deleteCorpusFile(validateCorpusId(corpusId), validateUuid(fileId, "file ID"));
+        if (!response.getSuccess()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, response.getMessage());
+        }
+        return Map.of("success", true, "message", response.getMessage());
+    }
+
     private String validateCorpusId(String corpusId) {
+        return validateUuid(corpusId, "corpus ID");
+    }
+
+    private String validateUuid(String value, String label) {
         try {
-            UUID parsed = UUID.fromString(corpusId);
-            if (!parsed.toString().equalsIgnoreCase(corpusId)) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid corpus ID");
+            UUID parsed = UUID.fromString(value);
+            if (!parsed.toString().equalsIgnoreCase(value)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid " + label);
             }
             return parsed.toString();
         } catch (ResponseStatusException ex) {
             throw ex;
         } catch (RuntimeException ex) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid corpus ID", ex);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid " + label, ex);
         }
     }
 }

@@ -17,7 +17,7 @@ from pymilvus import (
 )
 from neo4j import GraphDatabase
 
-from corpus import collection_for_corpus, normalize_corpus_id
+from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, normalize_file_id
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ class CorpusIndexer:
             )
         except Exception:
             logger.exception("Indexing upload %s failed", file_id)
-            self._rollback_upload(corpus_id, file_id, object_key, nodes)
+            self._rollback_upload(corpus_id, file_id, object_key)
             raise
 
         return {"file_id": file_id, "filename": filename, "chunk_count": len(nodes)}
@@ -153,6 +153,61 @@ class CorpusIndexer:
                     files.append({"file_id": parts[0], "filename": parts[1]})
         return files
 
+    def get_file(self, corpus_id: str, file_id: str):
+        """Returns {'filename', 'content'} for one uploaded file (used for preview)."""
+        corpus_id, file_id, object_key = self._locate_file(corpus_id, file_id)
+        body = self.s3.get_object(Bucket=self.bucket_name, Key=object_key)["Body"].read()
+        return {
+            "filename": object_key.rsplit("/", 1)[-1],
+            "content": body.decode("utf-8-sig", errors="replace"),
+        }
+
+    def delete_file(self, corpus_id: str, file_id: str) -> str:
+        """Removes a file's chunks from Neo4j and Milvus, then its source object.
+        Returns the deleted filename."""
+        corpus_id, file_id, object_key = self._locate_file(corpus_id, file_id)
+        self._delete_graph_chunks(corpus_id, file_id)
+        self._delete_vectors(corpus_id, file_id)
+        # Object last: if an index delete fails, the file stays listed and can be retried.
+        self.s3.delete_object(Bucket=self.bucket_name, Key=object_key)
+        return object_key.rsplit("/", 1)[-1]
+
+    def _locate_file(self, corpus_id: str, file_id: str):
+        corpus_id = normalize_corpus_id(corpus_id)
+        if corpus_id == "wiki":
+            raise ValueError("The wiki corpus does not contain user uploads")
+        file_id = normalize_file_id(file_id)
+        prefix = f"uploads/{corpus_id}/{file_id}/"
+        listing = self.s3.list_objects_v2(Bucket=self.bucket_name, Prefix=prefix, MaxKeys=1)
+        contents = listing.get("Contents", [])
+        if not contents:
+            raise FileNotFoundError("File not found in this workspace")
+        return corpus_id, file_id, contents[0]["Key"]
+
+    def _delete_graph_chunks(self, corpus_id, file_id):
+        with self.neo4j_driver.session() as session:
+            session.run(
+                "MATCH (c:Chunk {corpus_id: $corpus_id, file_id: $file_id}) DETACH DELETE c",
+                corpus_id=corpus_id,
+                file_id=file_id,
+            ).consume()
+
+    def _delete_vectors(self, corpus_id, file_id):
+        self._connect_milvus()
+        collection_name = collection_for_corpus(corpus_id)
+        if utility.has_collection(collection_name):
+            collection = Collection(collection_name)
+            collection.delete(file_filter_expr([file_id]))
+            collection.flush()
+
+    @staticmethod
+    def _connect_milvus():
+        connections.connect(
+            alias="default",
+            host=os.getenv("MILVUS_HOST", "localhost"),
+            port=os.getenv("MILVUS_PORT", "19530"),
+        )
+
     def _ensure_bucket(self):
         try:
             self.s3.head_bucket(Bucket=self.bucket_name)
@@ -162,25 +217,14 @@ class CorpusIndexer:
                 raise
             self.s3.create_bucket(Bucket=self.bucket_name)
 
-    def _rollback_upload(self, corpus_id, file_id, object_key, nodes):
+    def _rollback_upload(self, corpus_id, file_id, object_key):
         try:
-            with self.neo4j_driver.session() as session:
-                session.run(
-                    "MATCH (c:Chunk {corpus_id: $corpus_id, file_id: $file_id}) "
-                    "DETACH DELETE c",
-                    corpus_id=corpus_id,
-                    file_id=file_id,
-                ).consume()
+            self._delete_graph_chunks(corpus_id, file_id)
         except Exception:
             logger.exception("Could not roll back graph data for upload %s", file_id)
 
         try:
-            collection_name = collection_for_corpus(corpus_id)
-            if utility.has_collection(collection_name):
-                chunk_ids = [node["chunk_id"] for node in nodes]
-                escaped_ids = ", ".join(f'"{chunk_id}"' for chunk_id in chunk_ids)
-                Collection(collection_name).delete(f"doc_id in [{escaped_ids}]")
-                Collection(collection_name).flush()
+            self._delete_vectors(corpus_id, file_id)
         except Exception:
             logger.exception("Could not roll back vector data for upload %s", file_id)
 
@@ -212,13 +256,9 @@ class CorpusIndexer:
                 """
                 session.run(upsert_edges, edges=edges).consume()
 
-    @staticmethod
-    def _write_vectors(collection_name, nodes, vectors):
-        connections.connect(
-            alias="default",
-            host=os.getenv("MILVUS_HOST", "localhost"),
-            port=os.getenv("MILVUS_PORT", "19530"),
-        )
+    @classmethod
+    def _write_vectors(cls, collection_name, nodes, vectors):
+        cls._connect_milvus()
         if not utility.has_collection(collection_name):
             fields = [
                 FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),

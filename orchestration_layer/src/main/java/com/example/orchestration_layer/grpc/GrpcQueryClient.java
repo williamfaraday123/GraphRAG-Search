@@ -61,12 +61,14 @@ public class GrpcQueryClient {
      * Starts the search pipeline on the Query Processor and streams
      * results through the provided event consumer.
      */
-    public void startSearch(String prompt, int topK, String corpusId, Consumer<SearchEvent> eventConsumer) {
+    public void startSearch(String prompt, int topK, String corpusId, List<String> fileIds,
+                            Consumer<SearchEvent> eventConsumer) {
         var request = QueryProto.SearchRequest.newBuilder()
                 .setPrompt(prompt)
                 .setTopK(topK)
                 .setUseGraphRefinement(true)
                 .setCorpusId(corpusId)
+                .addAllFileIds(fileIds) // empty = search every file in the corpus
                 .build();
 
         asyncStub.startProcessing(request, new StreamObserver<QueryProto.SearchResponse>() {
@@ -156,5 +158,24 @@ public class GrpcQueryClient {
             files.add(Map.of("fileId", file.getFileId(), "filename", file.getFilename()));
         }
         return files;
+    }
+
+    public QueryProto.GetCorpusFileResponse getCorpusFile(String corpusId, String fileId) {
+        return blockingStub
+                .withDeadlineAfter(15, TimeUnit.SECONDS)
+                .getCorpusFile(corpusFileRequest(corpusId, fileId));
+    }
+
+    public QueryProto.DeleteCorpusFileResponse deleteCorpusFile(String corpusId, String fileId) {
+        return blockingStub
+                .withDeadlineAfter(30, TimeUnit.SECONDS)
+                .deleteCorpusFile(corpusFileRequest(corpusId, fileId));
+    }
+
+    private static QueryProto.CorpusFileRequest corpusFileRequest(String corpusId, String fileId) {
+        return QueryProto.CorpusFileRequest.newBuilder()
+                .setCorpusId(corpusId)
+                .setFileId(fileId)
+                .build();
     }
 }

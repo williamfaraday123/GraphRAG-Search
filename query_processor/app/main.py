@@ -11,7 +11,7 @@ import query_pb2_grpc
 
 from retriever import HybridRetriever
 from graph_engine import build_query_graph
-from corpus import normalize_corpus_id
+from corpus import normalize_corpus_id, normalize_file_id
 from corpus_indexer import CorpusIndexer
 
 # Aliases for readability
@@ -58,7 +58,8 @@ class QueryProcessorServicer:
         try:
             prompt = request.prompt
             corpus_id = normalize_corpus_id(request.corpus_id)
-            logger.info(f"Processing query: {prompt}")
+            file_ids = [normalize_file_id(f) for f in request.file_ids]
+            logger.info(f"Processing query: {prompt} (files: {file_ids or 'all'})")
 
             yield self._make_status("RETRIEVING", "Fetching vectors and graph relations...")
 
@@ -66,6 +67,7 @@ class QueryProcessorServicer:
                 "query": prompt,
                 "top_k": request.top_k or 5,
                 "corpus_id": corpus_id,
+                "file_ids": file_ids,
                 "all_chunks": [],
                 "all_relations": [],
                 "refined_context": [],
@@ -180,6 +182,33 @@ class QueryProcessorServicer:
             logger.exception("Could not list corpus files")
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
+        return response
+
+    def GetCorpusFile(self, request, context):
+        response = query_pb2.GetCorpusFileResponse()
+        try:
+            file = self.corpus_indexer.get_file(request.corpus_id, request.file_id)
+            response.found = True
+            response.filename = file["filename"]
+            response.content = file["content"]
+        except (ValueError, FileNotFoundError) as e:
+            response.error = str(e)
+        except Exception as e:
+            logger.exception("Could not read corpus file")
+            response.error = f"Could not read file: {e}"
+        return response
+
+    def DeleteCorpusFile(self, request, context):
+        response = query_pb2.DeleteCorpusFileResponse()
+        try:
+            filename = self.corpus_indexer.delete_file(request.corpus_id, request.file_id)
+            response.success = True
+            response.message = f"Deleted {filename}"
+        except (ValueError, FileNotFoundError) as e:
+            response.message = str(e)
+        except Exception as e:
+            logger.exception("Could not delete corpus file")
+            response.message = f"Could not delete file: {e}"
         return response
 
     def _make_status(self, stage: str, msg: str):

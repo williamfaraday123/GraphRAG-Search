@@ -9,6 +9,8 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -46,11 +48,18 @@ public class SearchController {
         String prompt = (String) body.getOrDefault("prompt", "");
         int topK = (int) body.getOrDefault("topK", 5);
         String corpusId = body.get("corpusId") instanceof String value ? value : "wiki";
+        List<String> fileIds = new ArrayList<>();
+        if (body.get("fileIds") instanceof List<?> ids) {
+            for (Object id : ids) {
+                if (id instanceof String s && !s.isBlank()) fileIds.add(s);
+            }
+        }
 
         SseEmitter emitter = new SseEmitter(sseTimeoutMs);
-        log.info("Search request received: prompt='{}', topK={}, corpusId={}", prompt, topK, corpusId);
+        log.info("Search request received: prompt='{}', topK={}, corpusId={}, fileIds={}",
+                prompt, topK, corpusId, fileIds.isEmpty() ? "all" : fileIds);
 
-        grpcClient.startSearch(prompt, topK, corpusId, event -> {
+        grpcClient.startSearch(prompt, topK, corpusId, fileIds, event -> {
             try {
                 switch (event.getType()) {
                     case STATUS -> emitter.send(SseEmitter.event()

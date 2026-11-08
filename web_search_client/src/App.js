@@ -18,6 +18,13 @@ function App() {
   const [uploadedFiles, setUploadedFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadFeedback, setUploadFeedback] = useState(null);
+  // Checked files: the targets for Preview/Delete, and the query scope (none checked = all files)
+  const [selectedFileIds, setSelectedFileIds] = useState(() => new Set());
+  const [previewIds, setPreviewIds] = useState([]);
+  const [previewCache, setPreviewCache] = useState({}); // fileId -> { loading, content, error }
+  const [deletingFiles, setDeletingFiles] = useState(false);
+  const [fileActionError, setFileActionError] = useState(null);
+  const selectAllRef = useRef(null);
   const [status, setStatus] = useState(null);
   const [agentSteps, setAgentSteps] = useState([]);
   const [streamedText, setStreamedText] = useState('');
@@ -44,6 +51,9 @@ function App() {
         const files = await response.json();
         if (active) {
           setUploadedFiles(files);
+          // Drop selections for files that no longer exist (e.g. deleted in another tab)
+          const ids = new Set(files.map((f) => f.fileId));
+          setSelectedFileIds((prev) => new Set([...prev].filter((id) => ids.has(id))));
           setCorpusError(null);
         }
       } catch (err) {
@@ -133,6 +143,80 @@ function App() {
     }
   }, [corpusId, uploading]);
 
+  const selectedCount = uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).length;
+  const allSelected = uploadedFiles.length > 0 && selectedCount === uploadedFiles.length;
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selectedCount > 0 && !allSelected;
+    }
+  }, [selectedCount, allSelected]);
+
+  const toggleFileSelected = useCallback((fileId) => {
+    setSelectedFileIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(fileId)) next.delete(fileId); else next.add(fileId);
+      return next;
+    });
+  }, []);
+
+  const toggleAllFiles = useCallback(() => {
+    setSelectedFileIds(allSelected ? new Set() : new Set(uploadedFiles.map((f) => f.fileId)));
+  }, [allSelected, uploadedFiles]);
+
+  const previewSelected = useCallback(() => {
+    const ids = uploadedFiles.map((f) => f.fileId).filter((id) => selectedFileIds.has(id));
+    setPreviewIds(ids);
+    ids.filter((id) => !previewCache[id]).forEach((id) => {
+      setPreviewCache((prev) => ({ ...prev, [id]: { loading: true, content: null, error: null } }));
+      fetch(`${API_BASE}/api/v1/corpora/${encodeURIComponent(corpusId)}/files/${encodeURIComponent(id)}`)
+        .then(async (res) => {
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.message || `Could not load file (${res.status})`);
+          setPreviewCache((prev) => ({ ...prev, [id]: { loading: false, content: data.content, error: null } }));
+        })
+        .catch((err) => {
+          setPreviewCache((prev) => ({ ...prev, [id]: { loading: false, content: null, error: err.message } }));
+        });
+    });
+  }, [uploadedFiles, selectedFileIds, previewCache, corpusId]);
+
+  const deleteSelected = useCallback(async () => {
+    const targets = uploadedFiles.filter((f) => selectedFileIds.has(f.fileId));
+    if (!targets.length || deletingFiles) return;
+    const names = targets.map((f) => f.filename).join(', ');
+    if (!window.confirm(`Delete ${targets.length} file${targets.length === 1 ? '' : 's'} (${names})? `
+      + 'They will be removed from search permanently.')) return;
+
+    setDeletingFiles(true);
+    setFileActionError(null);
+    const deleted = new Set();
+    const failures = [];
+    for (const file of targets) {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/v1/corpora/${encodeURIComponent(corpusId)}/files/${encodeURIComponent(file.fileId)}`,
+          { method: 'DELETE' }
+        );
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.message || `status ${res.status}`);
+        }
+        deleted.add(file.fileId);
+      } catch (err) {
+        failures.push(`${file.filename}: ${err.message}`);
+      }
+    }
+    setUploadedFiles((prev) => prev.filter((f) => !deleted.has(f.fileId)));
+    setSelectedFileIds((prev) => new Set([...prev].filter((id) => !deleted.has(id))));
+    setPreviewIds((prev) => prev.filter((id) => !deleted.has(id)));
+    setUploadFeedback(deleted.size
+      ? { message: `Deleted ${deleted.size} file${deleted.size === 1 ? '' : 's'}.` }
+      : null);
+    if (failures.length) setFileActionError(`Could not delete ${failures.join('; ')}`);
+    setDeletingFiles(false);
+  }, [uploadedFiles, selectedFileIds, deletingFiles, corpusId]);
+
   const handleSearch = useCallback((e) => {
     e.preventDefault();
     if (!query.trim() || isLoading || (mode === 'files' && !uploadedFiles.length)) return;
@@ -149,6 +233,10 @@ function App() {
         prompt: query.trim(),
         topK: 5,
         corpusId: mode === 'wiki' ? 'wiki' : corpusId,
+        // Checked files scope the question; none checked = search every uploaded file
+        fileIds: mode === 'files'
+          ? uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)
+          : [],
       }),
       signal: controller.signal,
     })
@@ -187,7 +275,7 @@ function App() {
 
     eventSourceRef.current = { close: () => controller.abort() };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, isLoading, mode, corpusId, uploadedFiles.length, resetState]);
+  }, [query, isLoading, mode, corpusId, uploadedFiles, selectedFileIds, resetState]);
 
   const handleSSEEvent = (eventType, data) => {
     switch (eventType) {
@@ -326,15 +414,80 @@ function App() {
           {uploadFeedback?.error && <p className="upload-error">{uploadFeedback.error}</p>}
           {uploadedFiles.length > 0 && (
             <div className="uploaded-files">
-              <h3>Indexed files ({uploadedFiles.length})</h3>
+              <div className="files-toolbar">
+                <label className="file-check">
+                  <input
+                    type="checkbox"
+                    ref={selectAllRef}
+                    checked={allSelected}
+                    onChange={toggleAllFiles}
+                    aria-label="Select all files"
+                  />
+                  <span className="files-heading">Indexed files ({uploadedFiles.length})</span>
+                </label>
+                <div className="file-actions">
+                  <button
+                    type="button"
+                    className="file-action"
+                    onClick={previewSelected}
+                    disabled={!selectedCount}
+                  >
+                    Preview{selectedCount ? ` (${selectedCount})` : ''}
+                  </button>
+                  <button
+                    type="button"
+                    className="file-action file-action-danger"
+                    onClick={deleteSelected}
+                    disabled={!selectedCount || deletingFiles}
+                  >
+                    {deletingFiles ? 'Deleting…' : `Delete${selectedCount ? ` (${selectedCount})` : ''}`}
+                  </button>
+                </div>
+              </div>
               <ul>
                 {uploadedFiles.map((file) => (
                   <li key={file.fileId || file.filename}>
-                    <span>{file.filename}</span>
-                    <span>{file.chunkCount ? `${file.chunkCount} chunks · ` : ''}Ready</span>
+                    <label className="file-check">
+                      <input
+                        type="checkbox"
+                        checked={selectedFileIds.has(file.fileId)}
+                        onChange={() => toggleFileSelected(file.fileId)}
+                        aria-label={`Select ${file.filename}`}
+                      />
+                      <span className="file-name">{file.filename}</span>
+                    </label>
+                    <span className="file-status">{file.chunkCount ? `${file.chunkCount} chunks · ` : ''}Ready</span>
                   </li>
                 ))}
               </ul>
+              <p className="file-scope">
+                {selectedCount
+                  ? `Questions will search the ${selectedCount} selected file${selectedCount === 1 ? '' : 's'} only.`
+                  : `No files selected: questions will search all ${uploadedFiles.length} files.`}
+              </p>
+              {fileActionError && <p className="upload-error">{fileActionError}</p>}
+              {previewIds.length > 0 && (
+                <div className="file-preview" aria-label="File preview">
+                  <div className="file-preview-header">
+                    <h3>Preview</h3>
+                    <button type="button" className="file-action" onClick={() => setPreviewIds([])}>
+                      Close
+                    </button>
+                  </div>
+                  {previewIds.map((id) => {
+                    const file = uploadedFiles.find((f) => f.fileId === id);
+                    const cached = previewCache[id];
+                    return (
+                      <div key={id} className="file-preview-item">
+                        <h4>{file ? file.filename : id}</h4>
+                        {cached?.loading && <span className="evidence-loading">Loading…</span>}
+                        {cached?.error && <span className="evidence-error">⚠️ {cached.error}</span>}
+                        {cached?.content != null && <pre className="file-preview-text">{cached.content}</pre>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </section>

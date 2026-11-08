@@ -3,7 +3,7 @@ from services.milvus_client import MilvusService
 from services.neo4j_client import Neo4jService
 from services.object_storage_client import ObjectStorageRetriever
 from embedding import EmbeddingService
-from corpus import collection_for_corpus, normalize_corpus_id, WIKI_CORPUS_ID
+from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, WIKI_CORPUS_ID
 import logging
 import os
 
@@ -34,6 +34,7 @@ class HybridRetriever:
         top_k: int = 5,
         collection_name: str = None,
         corpus_id: str = WIKI_CORPUS_ID,
+        file_ids: List[str] = None,
     ) -> Dict[str, Any]:
         """
         Performs the full hybrid retrieval pipeline:
@@ -46,7 +47,9 @@ class HybridRetriever:
         logger.info(f"Starting sub-graph retrieval for query: '{query}' (Top-K: {top_k})")
         corpus_id = normalize_corpus_id(corpus_id)
         collection_name = collection_name or collection_for_corpus(corpus_id)
-        
+        # Only upload workspaces have per-file chunk ids; wiki searches ignore file_ids.
+        file_expr = file_filter_expr(file_ids) if file_ids and corpus_id != WIKI_CORPUS_ID else None
+
         # --- STEP 1: Generate Embedding ---
         try:
             query_vector = self.embedding_service.generate_embedding(query)
@@ -62,7 +65,8 @@ class HybridRetriever:
             milvus_results = self.milvus_service.search_vectors(
                 collection_name=collection_name,
                 query_vector=query_vector,
-                top_k=top_k
+                top_k=top_k,
+                expr=file_expr,
             )
             logger.info(f"Milvus returned {len(milvus_results)} chunks")
         except Exception as e:

@@ -1,5 +1,5 @@
 from pymilvus import connections, Collection
-from typing import List, Dict
+from typing import List, Dict, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,10 +18,12 @@ class MilvusService:
             logger.error(f"Failed to connect to Milvus: {e}")
             raise
 
-    def search_vectors(self, collection_name: str, query_vector: List[float], top_k: int) -> List[Dict]:
+    def search_vectors(self, collection_name: str, query_vector: List[float], top_k: int,
+                       expr: Optional[str] = None) -> List[Dict]:
         """
         Performs vector similarity search.
         Returns list of documents with metadata.
+        expr: optional Milvus boolean filter, e.g. to restrict to selected files.
         """
         try:
             collection = Collection(collection_name)
@@ -34,6 +36,7 @@ class MilvusService:
                 anns_field="vector",
                 param=search_params,
                 limit=top_k,
+                expr=expr,
                 output_fields=["content", "source_url", "doc_id"]
             )
             
