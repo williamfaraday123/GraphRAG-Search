@@ -7,12 +7,17 @@ service QueryProcessorService {
   rpc StartProcessing (SearchRequest) returns (stream SearchResponse);
   // Fetches the full source document for one retrieved chunk from object storage
   rpc GetChunkSource (ChunkSourceRequest) returns (ChunkSourceResponse);
+  // Stores and indexes a text or Markdown file in an isolated corpus
+  rpc UploadCorpusFile (UploadCorpusFileRequest) returns (UploadCorpusFileResponse);
+  // Lists indexed files in a corpus
+  rpc ListCorpusFiles (ListCorpusFilesRequest) returns (ListCorpusFilesResponse);
 }
 
 message SearchRequest {
   string prompt = 1;
   int32 top_k = 2;
   bool use_graph_refinement = 3;
+  string corpus_id = 4; // "wiki" or an isolated upload workspace UUID
 }
 
 message SearchResponse {
@@ -66,4 +71,31 @@ message ChunkSourceResponse {
   bool found = 1;
   string content = 2;
   string error = 3;
+}
+
+message UploadCorpusFileRequest {
+  string corpus_id = 1;
+  string filename = 2;
+  bytes content = 3;
+}
+
+message UploadCorpusFileResponse {
+  bool success = 1;
+  string file_id = 2;
+  string filename = 3;
+  int32 chunk_count = 4;
+  string message = 5;
+}
+
+message ListCorpusFilesRequest {
+  string corpus_id = 1;
+}
+
+message CorpusFile {
+  string file_id = 1;
+  string filename = 2;
+}
+
+message ListCorpusFilesResponse {
+  repeated CorpusFile files = 1;
 }

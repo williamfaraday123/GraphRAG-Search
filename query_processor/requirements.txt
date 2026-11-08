@@ -1,3 +1,6 @@
+# torch==2.6.0+cpu is only published on PyTorch's index, not PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 fastapi
 uvicorn
 grpcio
@@ -7,6 +10,7 @@ neo4j
 langchain
 langchain-community
 langchain-openai
+langchain-text-splitters
 langgraph
 python-dotenv
 pydantic

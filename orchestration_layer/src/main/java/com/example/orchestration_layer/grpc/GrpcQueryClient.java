@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import com.google.protobuf.ByteString;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -60,11 +61,12 @@ public class GrpcQueryClient {
      * Starts the search pipeline on the Query Processor and streams
      * results through the provided event consumer.
      */
-    public void startSearch(String prompt, int topK, Consumer<SearchEvent> eventConsumer) {
+    public void startSearch(String prompt, int topK, String corpusId, Consumer<SearchEvent> eventConsumer) {
         var request = QueryProto.SearchRequest.newBuilder()
                 .setPrompt(prompt)
                 .setTopK(topK)
                 .setUseGraphRefinement(true)
+                .setCorpusId(corpusId)
                 .build();
 
         asyncStub.startProcessing(request, new StreamObserver<QueryProto.SearchResponse>() {
@@ -132,5 +134,27 @@ public class GrpcQueryClient {
                     response.getError().isEmpty() ? "Source not found" : response.getError());
         }
         return response.getContent();
+    }
+
+    public QueryProto.UploadCorpusFileResponse uploadCorpusFile(
+            String corpusId, String filename, byte[] content) {
+        var request = QueryProto.UploadCorpusFileRequest.newBuilder()
+                .setCorpusId(corpusId)
+                .setFilename(filename)
+                .setContent(ByteString.copyFrom(content))
+                .build();
+        return blockingStub.uploadCorpusFile(request);
+    }
+
+    public List<Map<String, String>> listCorpusFiles(String corpusId) {
+        var request = QueryProto.ListCorpusFilesRequest.newBuilder()
+                .setCorpusId(corpusId)
+                .build();
+        var response = blockingStub.listCorpusFiles(request);
+        List<Map<String, String>> files = new ArrayList<>();
+        for (var file : response.getFilesList()) {
+            files.add(Map.of("fileId", file.getFileId(), "filename", file.getFilename()));
+        }
+        return files;
     }
 }

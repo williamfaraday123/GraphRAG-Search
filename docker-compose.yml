@@ -53,7 +53,8 @@ services:
 
   # 3. MinIO (S3 Compatible Storage)
   minio:
-    image: minio/minio
+    # Official minio/minio images were pulled from Docker Hub/quay.io; pgsty/minio is a maintained drop-in build.
+    image: pgsty/minio:latest
     container_name: minio
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
@@ -108,8 +109,12 @@ services:
       - MINIO_ENDPOINT=http://minio:9000
       - NEO4J_URI=bolt://neo4j:7687
       - MILVUS_HOST=milvus-standalone
+      # .env holds host-side values (localhost); containers reach host Ollama via host.docker.internal
+      - EDGE_MODEL_BASE_URL=${DOCKER_EDGE_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
       - HF_HOME=/app/.cache/huggingface
       - HF_HUB_DISABLE_XET=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./ingestion_pipeline/raw_data:/app/raw_data
       - hf_cache:/app/.cache/huggingface
@@ -138,8 +143,12 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123}
       - MINIO_ENDPOINT=http://minio:9000
+      # .env holds host-side values (localhost); containers reach host Ollama via host.docker.internal
+      - EDGE_MODEL_BASE_URL=${DOCKER_EDGE_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
       - HF_HOME=/app/.cache/huggingface
       - HF_HUB_DISABLE_XET=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - hf_cache:/app/.cache/huggingface
     ports:

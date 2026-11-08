@@ -77,4 +77,5 @@ venv\Scripts\activate.bat
 pip install -r requirements.txt
 python upload_to_minio.py # upload all .txt files from the raw_data folder into MinIO's rag-datasets bucket
 python main.py
+python index_to_milvus.py  # embed the Neo4j chunks into Milvus; search finds nothing without this
 ```

@@ -11,6 +11,8 @@ import query_pb2_grpc
 
 from retriever import HybridRetriever
 from graph_engine import build_query_graph
+from corpus import normalize_corpus_id
+from corpus_indexer import CorpusIndexer
 
 # Aliases for readability
 SearchRequest = query_pb2.SearchRequest
@@ -44,6 +46,7 @@ class QueryProcessorServicer:
             embedding_model="all-MiniLM-L6-v2" # Must match Milvus collection dimension
         )
         self.app_graph = build_query_graph(self.retriever)
+        self.corpus_indexer = CorpusIndexer(self.retriever.embedding_service)
 
     def StartProcessing(self, request, context) -> Iterator[SearchResponse]:
         """
@@ -54,6 +57,7 @@ class QueryProcessorServicer:
         """
         try:
             prompt = request.prompt
+            corpus_id = normalize_corpus_id(request.corpus_id)
             logger.info(f"Processing query: {prompt}")
 
             yield self._make_status("RETRIEVING", "Fetching vectors and graph relations...")
@@ -61,6 +65,7 @@ class QueryProcessorServicer:
             initial_state = {
                 "query": prompt,
                 "top_k": request.top_k or 5,
+                "corpus_id": corpus_id,
                 "all_chunks": [],
                 "all_relations": [],
                 "refined_context": [],
@@ -144,6 +149,39 @@ class QueryProcessorServicer:
             resp.error = str(e)
         return resp
 
+    def UploadCorpusFile(self, request, context):
+        response = query_pb2.UploadCorpusFileResponse()
+        try:
+            result = self.corpus_indexer.index_file(
+                request.corpus_id,
+                request.filename,
+                request.content,
+            )
+            response.success = True
+            response.file_id = result["file_id"]
+            response.filename = result["filename"]
+            response.chunk_count = result["chunk_count"]
+            response.message = "File indexed and ready to search"
+        except ValueError as e:
+            response.message = str(e)
+        except Exception as e:
+            logger.exception("Upload indexing failed")
+            response.message = f"Failed to index uploaded file: {e}"
+        return response
+
+    def ListCorpusFiles(self, request, context):
+        response = query_pb2.ListCorpusFilesResponse()
+        try:
+            for file in self.corpus_indexer.list_files(request.corpus_id):
+                item = response.files.add()
+                item.file_id = file["file_id"]
+                item.filename = file["filename"]
+        except Exception as e:
+            logger.exception("Could not list corpus files")
+            context.set_details(str(e))
+            context.set_code(grpc.StatusCode.INTERNAL)
+        return response
+
     def _make_status(self, stage: str, msg: str):
         resp = SearchResponse()
         resp.status.stage = stage
@@ -157,7 +195,10 @@ class QueryProcessorServicer:
         return resp
 
 def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[("grpc.max_receive_message_length", 6 * 1024 * 1024)],
+    )
     query_pb2_grpc.add_QueryProcessorServiceServicer_to_server(QueryProcessorServicer(), server)
     server.add_insecure_port('[::]:50051')
     server.start()

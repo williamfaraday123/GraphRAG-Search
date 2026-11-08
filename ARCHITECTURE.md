@@ -59,7 +59,7 @@ raw_data/ -> MinIO -> DocumentChunker -> EdgeGenerator -> Neo4j
 
 ## Search flow
 
-1. The browser sends `POST /api/v1/search` to the orchestration layer with `prompt` and optional `topK`.
+1. The browser sends `POST /api/v1/search` to the orchestration layer with `prompt`, optional `topK`, and a corpus ID (`wiki` or an upload workspace UUID).
 2. `SearchController` calls the query processor's `StartProcessing` gRPC method.
 3. The query processor's planner either searches the prompt directly or decomposes a multi-part query into a small number of subqueries.
 4. For each search query, `HybridRetriever`:
@@ -72,6 +72,18 @@ raw_data/ -> MinIO -> DocumentChunker -> EdgeGenerator -> Neo4j
 7. The synthesizer LLM produces the final answer from the highest-ranked evidence chunks.
 8. The query processor streams statuses, agent steps, answer words, and final evidence over gRPC. Spring Boot relays them as SSE events to the browser.
 
+For an upload workspace, the query processor selects the workspace-specific Milvus collection and filters Neo4j relationships by `corpus_id`. The answer synthesizer is instructed to rely only on retrieved upload context. The wiki path retains its existing `ai_docs` collection and behavior.
+
+## User-uploaded corpus flow
+
+1. React creates a workspace with `POST /api/v1/corpora` and stores its UUID in browser local storage.
+2. The browser uploads `.txt` or `.md` files to `POST /api/v1/corpora/{corpusId}/files`. Spring Boot validates the workspace and upload size, then forwards file bytes to the query processor over gRPC.
+3. The query processor decodes UTF-8 text, splits it into chunks, creates sequential chunk relationships, embeds the chunks, writes them to Neo4j and a dedicated `corpus_{uuid}` Milvus collection, and stores the original in MinIO.
+4. `GET /api/v1/corpora/{corpusId}/files` lists successfully indexed files from MinIO.
+5. Search requests carry the selected corpus ID, so a user-file query cannot retrieve Wiki vectors or chunks from a different workspace.
+
+Uploads are synchronous and limited to five `.txt`/`.md` files per request, 5 MB each. Workspace UUIDs are not a substitute for authentication; deployments serving multiple users should associate corpus IDs with authenticated owners and authorize every corpus operation.
+
 ## Interfaces
 
 ### Browser API
@@ -79,6 +91,9 @@ raw_data/ -> MinIO -> DocumentChunker -> EdgeGenerator -> Neo4j
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/v1/search` | Starts a search and returns an SSE stream. Body: `{"prompt":"...","topK":5}`. |
+| `POST /api/v1/corpora` | Creates an isolated file-upload workspace. |
+| `POST /api/v1/corpora/{corpusId}/files` | Uploads and indexes text/Markdown files. |
+| `GET /api/v1/corpora/{corpusId}/files` | Lists indexed files for a workspace. |
 | `GET /api/v1/chunk-source?uri=s3://...` | Retrieves the full source document through the backend. |
 | `GET /api/v1/health` | Returns the orchestration service health state. |
 

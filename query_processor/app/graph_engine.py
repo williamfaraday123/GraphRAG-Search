@@ -16,6 +16,7 @@ MAX_SUB_QUERIES = 3
 class AgentState(TypedDict):
     query: str
     top_k: int
+    corpus_id: str
     all_chunks: List[dict]        # Chunks accumulated across every retrieval round (deduped by id)
     all_relations: List[dict]     # Graph edges accumulated across every retrieval round (deduped)
     refined_context: List[dict]   # The current re-ranked list of chunks ready for LLM
@@ -104,7 +105,7 @@ def plan_query_node(state: AgentState):
     first retrieval round covers more ground than a single embedding lookup would.
     """
     llm = ChatOpenAI(
-        model=os.getenv("EDGE_MODEL", "qwen2.5:1.5b"),
+        model=os.getenv("EDGE_MODEL", "qwen3:4b-instruct"),
         base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
         api_key=os.getenv("LLM_API_KEY", "ollama")
     )
@@ -162,7 +163,7 @@ def make_retrieve_context_node(retriever: HybridRetriever):
             result = retriever.search(
                 query=q,
                 top_k=state.get("top_k") or 5,
-                collection_name="ai_docs"
+                corpus_id=state.get("corpus_id") or "wiki",
             )
             new_chunks.extend(result.get("chunks", []))
             new_relations.extend(result.get("relations", []))
@@ -199,7 +200,7 @@ def critical_analysis_node(state: AgentState):
         }
 
     llm = ChatOpenAI(
-        model=os.getenv("EDGE_MODEL", "qwen2.5:1.5b"),
+        model=os.getenv("EDGE_MODEL", "qwen3:4b-instruct"),
         base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
         api_key=os.getenv("LLM_API_KEY", "ollama")
     )
@@ -255,34 +256,77 @@ def critical_analysis_node(state: AgentState):
         "search_queries": [refined_query]
     }
 
+def _chunk_position(chunk: dict):
+    """Chunk index within its file, parsed from upload ids like '<file_id>:<index>'.
+    Wiki chunk ids are hashes, so those return None and keep their ranked order."""
+    tail = str(chunk.get("id") or "").rsplit(":", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+def _format_context_by_file(chunks: List[dict]) -> str:
+    """
+    Groups retrieved chunks into one section per source file, in document order.
+    Listing each chunk as its own 'Source:' block made the model count chunks as
+    separate sources (e.g. 4 sources for 2 uploaded files) and mix up which file
+    said what. Files are ordered by their best-ranked chunk.
+    """
+    files: Dict[str, List[dict]] = {}
+    for c in chunks:  # already sorted by hybrid score, so dict order = best file first
+        files.setdefault(c.get("source") or "Unknown", []).append(c)
+
+    sections = []
+    for n, (source, file_chunks) in enumerate(files.items(), start=1):
+        if all(_chunk_position(c) is not None for c in file_chunks):
+            file_chunks = sorted(file_chunks, key=_chunk_position)
+        name = source.rsplit("/", 1)[-1]  # s3://bucket/uploads/<corpus>/<file_id>/name.txt -> name.txt
+        body = "\n[...]\n".join((c.get("content") or "").strip() for c in file_chunks)
+        sections.append(f"=== File {n}: {name} ===\n{body}")
+    return "\n\n".join(sections)
+
+
 def synthesize_answer(state: AgentState):
     """Step 3: Generate final response"""
     if not state["refined_context"]:
         return {"final_answer": "I couldn't find relevant information in the knowledge base to answer this query."}
 
     llm = ChatOpenAI(
-        model=os.getenv("EDGE_MODEL", "qwen2.5:1.5b"),
+        model=os.getenv("ANSWER_MODEL", "qwen3:4b-instruct"),
         base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
-        api_key=os.getenv("LLM_API_KEY", "ollama")
+        api_key=os.getenv("LLM_API_KEY", "ollama"),
+        temperature=0,  # deterministic answers; sampling made option picks vary run to run
     )
 
-    context_text = "\n\n".join([
-        f"Source: {c.get('source', 'Unknown')}\nContent: {c.get('content')}"
-        for c in state["refined_context"]
-    ])
+    context_text = _format_context_by_file(state["refined_context"])
 
-    prompt = f"""
-    Based on the following verified and authority-ranked context, answer the user query.
-    Prioritize information from sources with higher structural importance (connectivity).
-    Always cite the Source URL/ID.
+    # Checking each listed option against a quoted sentence stops the model picking
+    # distractors that the text attributes to a different subject (tested on IELTS-style
+    # multiple choice: 0/8 correct with the old prompt, 6/6 with this one).
+    prompt = f"""Answer the query using only the context below. The context is grouped by file;
+cite claims by file name. Treat each file as one source.
 
-    Query: {state['query']}
+If the query lists answer options, before answering go through EVERY option:
+- quote the exact sentence from the context that supports it, and
+- confirm the sentence is about the subject the query asks about (not a different
+  country, person or group mentioned nearby).
+Mark each option SUPPORTED or NOT SUPPORTED, then give the final answer using only
+SUPPORTED options, matching the number of answers the query asks for.
 
-    Context:
-    {context_text}
-    """
+Query: {state['query']}
 
-    response = llm.invoke([HumanMessage(content=prompt)])
+Context:
+{context_text}"""
+
+    if state.get("corpus_id") and state["corpus_id"] != "wiki":
+        system_message = SystemMessage(
+            content=(
+                "Answer only from the provided uploaded-file context. Do not use outside "
+                "knowledge. If the context does not contain the answer, say that the "
+                "uploaded files do not provide enough information."
+            )
+        )
+        response = llm.invoke([system_message, HumanMessage(content=prompt)])
+    else:
+        response = llm.invoke([HumanMessage(content=prompt)])
     return {"final_answer": response.content}
 
 # --- Graph Construction ---

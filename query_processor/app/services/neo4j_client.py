@@ -11,7 +11,7 @@ class Neo4jService:
     def close(self):
         self.driver.close()
 
-    def get_subgraph_adjacency(self, node_ids: List[str]) -> List[Dict]:
+    def get_subgraph_adjacency(self, node_ids: List[str], corpus_id: str = None) -> List[Dict]:
         """
         Retrieves the adjacency matrix (edge list) for a specific set of node IDs.
         This creates an 'induced subgraph' containing only the provided nodes 
@@ -25,9 +25,11 @@ class Neo4jService:
         if not node_ids:
             return []
 
-        cypher = """
+        corpus_filter = "AND n.corpus_id = $corpus_id AND m.corpus_id = $corpus_id" if corpus_id else ""
+        cypher = f"""
         MATCH (n)-[r]-(m)
         WHERE n.chunk_id IN $node_ids AND m.chunk_id IN $node_ids
+        {corpus_filter}
         RETURN n.chunk_id AS source, type(r) AS relation, m.chunk_id AS target, r.weight AS weight
         """
         
@@ -35,7 +37,10 @@ class Neo4jService:
         # If > 1000, we might need to batch this.
         try:
             with self.driver.session() as session:
-                result = session.run(cypher, node_ids=node_ids)
+                params = {"node_ids": node_ids}
+                if corpus_id:
+                    params["corpus_id"] = corpus_id
+                result = session.run(cypher, **params)
                 edges = []
                 for record in result:
                     edges.append({

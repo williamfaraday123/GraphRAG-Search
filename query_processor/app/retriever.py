@@ -3,7 +3,9 @@ from services.milvus_client import MilvusService
 from services.neo4j_client import Neo4jService
 from services.object_storage_client import ObjectStorageRetriever
 from embedding import EmbeddingService
+from corpus import collection_for_corpus, normalize_corpus_id, WIKI_CORPUS_ID
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +18,23 @@ class HybridRetriever:
         self.milvus_service = MilvusService(host=milvus_host, port=milvus_port)
         self.neo4j_service = Neo4jService(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
         self.embedding_service = EmbeddingService(model_name=embedding_model)
-        self.object_storage = ObjectStorageRetriever(vector_store=None, bucket_name="rag-datasets", aws_access_key_id="minioadmin", aws_secret_access_key="minioadmin123", endpoint_url="http://minio:9000")
+        self.object_storage = ObjectStorageRetriever(
+            vector_store=None,
+            bucket_name=os.getenv("MINIO_BUCKET", "rag-datasets"),
+            aws_access_key_id=os.getenv("MINIO_ROOT_USER", "minioadmin"),
+            aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "minioadmin"),
+            endpoint_url=os.getenv("MINIO_ENDPOINT", "http://localhost:9000"),
+        )
         
         logger.info("HybridRetriever initialized with Milvus, Neo4j, MinIO, and Local Embeddings")
 
-    def search(self, query: str, top_k: int = 5, collection_name: str = "ai_docs") -> Dict[str, Any]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        collection_name: str = None,
+        corpus_id: str = WIKI_CORPUS_ID,
+    ) -> Dict[str, Any]:
         """
         Performs the full hybrid retrieval pipeline:
         1. Generate Embedding for the query.
@@ -30,6 +44,8 @@ class HybridRetriever:
         5. Merge and return results.
         """
         logger.info(f"Starting sub-graph retrieval for query: '{query}' (Top-K: {top_k})")
+        corpus_id = normalize_corpus_id(corpus_id)
+        collection_name = collection_name or collection_for_corpus(corpus_id)
         
         # --- STEP 1: Generate Embedding ---
         try:
@@ -68,7 +84,10 @@ class HybridRetriever:
         adjacency_matrix = []
         if candidate_ids:
             try:
-                adjacency_matrix = self.neo4j_service.get_subgraph_adjacency(candidate_ids)
+                adjacency_matrix = self.neo4j_service.get_subgraph_adjacency(
+                    candidate_ids,
+                    corpus_id=None if corpus_id == WIKI_CORPUS_ID else corpus_id,
+                )
                 logger.info(f"Neo4j returned adjacency matrix with {len(adjacency_matrix)} edges")
             except Exception as e:
                 logger.error(f"Neo4j subgraph extraction failed: {e}")

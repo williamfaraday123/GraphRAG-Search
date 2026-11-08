@@ -1,6 +1,7 @@
 # Final Year Project: Reimagine-Google-Pagerank-Search-for-Generative-Information-Retrieval
 
 This project aims to develop an AI-powered search engine for Internet by leveraging Large Language Models (LLMs) like Perplexity AI and SearchGPT. The system will search and analyze online resources from databases such as the current Internet, providing intelligent retrieval, evaluation, and recommendation of relevant applications. By integrating AI-driven chatbot capabilities with traditional search engine algorithms, it will lead to next-generation search engine for information retrieval in the Internet.
+This project uses python 3.12
 
 <img width="4111" height="1270" alt="image" src="https://github.com/user-attachments/assets/791b172b-8a35-4b39-8470-c47d323bee05" />
 
@@ -46,12 +47,38 @@ docker compose ps
 
 [run ingestion_pipeline](ingestion_pipeline/README.md)
 
+```
+cd ingestion_pipeline
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
+python upload_to_minio.py # upload all .txt files from the raw_data folder into MinIO's rag-datasets bucket
+python main.py
+python index_to_milvus.py  # embed the Neo4j chunks into Milvus; search finds nothing without this
+```
+
 ### 2. Start the Python Query Processor
 [query_processor](query_processor/README.md)
 
-```powershell
+```
 cd query_processor
-venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
+```
+
+Generate the Python gRPC stubs from the proto file:
+```
+cd proto
+python -m grpc_tools.protoc -I. --python_out=../app --grpc_python_out=../app query.proto
+cd ..
+```
+This creates two files in app/:
+- app/query_pb2.py — the message classes
+- app/query_pb2_grpc.py — the server/client stubs
+
+run main.py:
+```
 cd app
 python main.py
 ```
@@ -83,8 +110,15 @@ Then open `http://localhost:3000`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/search` | Submit a search query. Body: `{"prompt": "...", "topK": 5}`. Returns SSE stream. |
+| `POST` | `/api/v1/search` | Submit a search query. Body: `{"prompt": "...", "topK": 5, "corpusId": "wiki"}`. Returns SSE stream. |
+| `POST` | `/api/v1/corpora` | Create an isolated upload workspace. Returns a UUID `corpusId`. |
+| `POST` | `/api/v1/corpora/{corpusId}/files` | Upload and index one or more `.txt`/`.md` files using multipart field `files` (up to 5 MB each, at most 5 per request). |
+| `GET` | `/api/v1/corpora/{corpusId}/files` | List files indexed in that workspace. |
 | `GET`  | `/api/v1/health` | Health check. Returns `{"status": "UP"}` |
+
+The React UI offers **Wiki dump** and **My files** modes. File uploads are indexed synchronously; once the upload request succeeds, questions in My files mode retrieve only from that workspace. Workspaces are stored in browser local storage and use UUIDs as bearer-like identifiers; add authentication and ownership checks before exposing this API to untrusted users.
+
+Uploads currently accept UTF-8 `.txt` and `.md` files only. Each workspace gets its own Milvus collection, while Neo4j chunk nodes are tagged with the workspace ID. Wiki requests continue to use the existing `ai_docs` collection.
 
 ## SSE Event Types
 

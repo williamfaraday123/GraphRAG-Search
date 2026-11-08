@@ -3,6 +3,7 @@ package com.example.orchestration_layer.controller;
 import com.example.orchestration_layer.grpc.GrpcQueryClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -27,9 +28,12 @@ public class SearchController {
 
     private static final Logger log = LoggerFactory.getLogger(SearchController.class);
     private final GrpcQueryClient grpcClient;
+    private final long sseTimeoutMs;
 
-    public SearchController(GrpcQueryClient grpcClient) {
+    public SearchController(GrpcQueryClient grpcClient,
+                            @Value("${search.sse-timeout-ms:900000}") long sseTimeoutMs) {
         this.grpcClient = grpcClient;
+        this.sseTimeoutMs = sseTimeoutMs;
     }
 
     /**
@@ -41,11 +45,12 @@ public class SearchController {
     public SseEmitter search(@RequestBody Map<String, Object> body) {
         String prompt = (String) body.getOrDefault("prompt", "");
         int topK = (int) body.getOrDefault("topK", 5);
+        String corpusId = body.get("corpusId") instanceof String value ? value : "wiki";
 
-        SseEmitter emitter = new SseEmitter(300_000L); // 5-minute timeout
-        log.info("Search request received: prompt='{}', topK={}", prompt, topK);
+        SseEmitter emitter = new SseEmitter(sseTimeoutMs);
+        log.info("Search request received: prompt='{}', topK={}, corpusId={}", prompt, topK, corpusId);
 
-        grpcClient.startSearch(prompt, topK, event -> {
+        grpcClient.startSearch(prompt, topK, corpusId, event -> {
             try {
                 switch (event.getType()) {
                     case STATUS -> emitter.send(SseEmitter.event()
@@ -91,7 +96,18 @@ public class SearchController {
         });
 
         emitter.onCompletion(() -> log.info("SSE stream completed for: {}", prompt));
-        emitter.onTimeout(() -> log.warn("SSE stream timed out for: {}", prompt));
+        emitter.onTimeout(() -> {
+            log.warn("SSE stream timed out after {} ms for: {}", sseTimeoutMs, prompt);
+            // Tell the UI instead of silently closing, so it doesn't look like it's still running.
+            try {
+                emitter.send(SseEmitter.event().name("error").data(Map.of(
+                        "message", "Search timed out after " + (sseTimeoutMs / 60000)
+                                + " minutes. The LLM may be running on CPU; try a shorter question or enable GPU.")));
+            } catch (IOException | IllegalStateException ignored) {
+                // Stream already closed
+            }
+            emitter.complete();
+        });
         emitter.onError(ex -> log.error("SSE stream error: {}", ex.getMessage()));
 
         return emitter;
