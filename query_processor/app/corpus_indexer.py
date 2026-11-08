@@ -18,12 +18,21 @@ from pymilvus import (
 from neo4j import GraphDatabase
 
 from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, normalize_file_id
+from document_text import (
+    STORED_CONTENT_TYPE,
+    SUPPORTED_EXTENSIONS,
+    display_name,
+    extract_text,
+    is_audio,
+    read_text_object,
+    stored_text_name,
+    transcript_key_for,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_CHUNKS_PER_FILE = 500
-ALLOWED_EXTENSIONS = {".txt", ".md"}
 
 
 class CorpusIndexer:
@@ -61,8 +70,8 @@ class CorpusIndexer:
         safe_name = PurePath((filename or "").replace("\\", "/").rsplit("/", 1)[-1]).name
         if not safe_name or safe_name in {".", ".."}:
             raise ValueError("A valid filename is required")
-        if PurePath(safe_name).suffix.lower() not in ALLOWED_EXTENSIONS:
-            raise ValueError("Only .txt and .md files are supported")
+        if PurePath(safe_name).suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise ValueError("Only .txt, .md, .pdf, .docx and .mp3 files are supported")
         return safe_name
 
     def index_file(self, corpus_id: str, filename: str, content: bytes):
@@ -76,15 +85,13 @@ class CorpusIndexer:
         if len(content) > MAX_FILE_BYTES:
             raise ValueError("Files must be 5 MB or smaller")
 
-        try:
-            text = content.decode("utf-8-sig")
-        except UnicodeDecodeError as exc:
-            raise ValueError("File must contain valid UTF-8 text") from exc
+        text = extract_text(filename, content)
         if not text.strip():
             raise ValueError("The uploaded file has no searchable text")
 
         file_id = str(uuid.uuid4())
-        object_key = f"uploads/{corpus_id}/{file_id}/{filename}"
+        # Only the extracted text is stored; the original PDF/DOCX/MP3 bytes are discarded
+        object_key = f"uploads/{corpus_id}/{file_id}/{stored_text_name(filename)}"
         source_uri = f"s3://{self.bucket_name}/{object_key}"
         chunks_text = self.splitter.split_text(text)
         chunks_text = chunks_text[:MAX_CHUNKS_PER_FILE]
@@ -120,13 +127,12 @@ class CorpusIndexer:
             self._write_vectors(
                 collection_for_corpus(corpus_id), nodes, vectors
             )
+            # Written last: once the object exists the file is listed as ready
             self.s3.put_object(
                 Bucket=self.bucket_name,
                 Key=object_key,
-                Body=content,
-                ContentType="text/markdown; charset=utf-8"
-                if filename.lower().endswith(".md")
-                else "text/plain; charset=utf-8",
+                Body=text.encode("utf-8"),
+                ContentType=STORED_CONTENT_TYPE,
             )
         except Exception:
             logger.exception("Indexing upload %s failed", file_id)
@@ -150,16 +156,15 @@ class CorpusIndexer:
                 remainder = key[len(prefix):]
                 parts = remainder.split("/", 1)
                 if len(parts) == 2:
-                    files.append({"file_id": parts[0], "filename": parts[1]})
+                    files.append({"file_id": parts[0], "filename": display_name(parts[1])})
         return files
 
     def get_file(self, corpus_id: str, file_id: str):
         """Returns {'filename', 'content'} for one uploaded file (used for preview)."""
         corpus_id, file_id, object_key = self._locate_file(corpus_id, file_id)
-        body = self.s3.get_object(Bucket=self.bucket_name, Key=object_key)["Body"].read()
         return {
-            "filename": object_key.rsplit("/", 1)[-1],
-            "content": body.decode("utf-8-sig", errors="replace"),
+            "filename": display_name(object_key.rsplit("/", 1)[-1]),
+            "content": read_text_object(self.s3, self.bucket_name, object_key),
         }
 
     def delete_file(self, corpus_id: str, file_id: str) -> str:
@@ -170,7 +175,9 @@ class CorpusIndexer:
         self._delete_vectors(corpus_id, file_id)
         # Object last: if an index delete fails, the file stays listed and can be retried.
         self.s3.delete_object(Bucket=self.bucket_name, Key=object_key)
-        return object_key.rsplit("/", 1)[-1]
+        if is_audio(object_key):  # older layout kept the transcript separately
+            self.s3.delete_object(Bucket=self.bucket_name, Key=transcript_key_for(object_key))
+        return display_name(object_key.rsplit("/", 1)[-1])
 
     def _locate_file(self, corpus_id: str, file_id: str):
         corpus_id = normalize_corpus_id(corpus_id)
@@ -228,10 +235,10 @@ class CorpusIndexer:
         except Exception:
             logger.exception("Could not roll back vector data for upload %s", file_id)
 
-        try:
+        try:  # S3 delete of a missing key is a no-op, so this is safe either way
             self.s3.delete_object(Bucket=self.bucket_name, Key=object_key)
         except Exception:
-            logger.exception("Could not roll back source object for upload %s", file_id)
+            logger.exception("Could not roll back object %s for upload %s", object_key, file_id)
 
     def _write_graph(self, nodes, edges):
         upsert_nodes = """

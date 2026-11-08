@@ -3,6 +3,7 @@ from botocore.config import Config
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from typing import Dict, Any, Optional
+from document_text import read_text_object
 
 class ObjectStorageRetriever:
     def __init__(self, vector_store, bucket_name: str, aws_access_key_id: str, aws_secret_access_key: str, endpoint_url: Optional[str] = None):
@@ -44,15 +45,10 @@ class ObjectStorageRetriever:
 
         # 2. Download the file from MinIO
         try:
-            # We use 'get_object' to stream the file content
-            response = self.s3_client.get_object(Bucket=bucket, Key=key)
-            
-            # Read the body and decode to string (assuming UTF-8 text)
-            # Note: If you store PDFs/Images, you would return bytes instead.
-            content = response['Body'].read().decode('utf-8')
-            
-            return content
-            
+            # Uploads are stored as UTF-8 text; older uploads in their original
+            # format (PDF/DOCX/MP3) are converted by read_text_object.
+            return read_text_object(self.s3_client, bucket, key)
+
         except Exception as e:
             # Re-raise with context so your HybridRetriever logger catches it
             raise Exception(f"Failed to fetch {s3_uri} from MinIO: {str(e)}")

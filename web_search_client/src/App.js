@@ -114,7 +114,10 @@ function App() {
     }
 
     setUploading(true);
-    setUploadFeedback(null);
+    const hasAudio = selectedFiles.some((file) => /\.mp3$/i.test(file.name));
+    setUploadFeedback(hasAudio
+      ? { message: 'Transcribing audio before indexing. This can take a few minutes…' }
+      : null);
     try {
       const formData = new FormData();
       selectedFiles.forEach((file) => formData.append('files', file));
@@ -246,6 +249,33 @@ function App() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        // Event state lives outside the read loop: a large event (e.g. the final
+        // "done" with evidence chunks) often arrives split across several reads.
+        let eventType = '';
+        let dataLines = [];
+
+        const dispatch = () => {
+          if (dataLines.length) {
+            try {
+              handleSSEEvent(eventType, JSON.parse(dataLines.join('\n')));
+            } catch (err) { /* skip malformed */ }
+          }
+          eventType = '';
+          dataLines = [];
+        };
+
+        const processLines = (lines) => {
+          for (const rawLine of lines) {
+            const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+            if (line === '') {
+              dispatch(); // blank line ends an event
+            } else if (line.startsWith('event:')) {
+              eventType = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).replace(/^ /, ''));
+            }
+          }
+        };
 
         while (true) {
           const { done: readerDone, value } = await reader.read();
@@ -254,19 +284,12 @@ function App() {
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
-
-          let eventType = '';
-          for (const line of lines) {
-            if (line.startsWith('event:')) {
-              eventType = line.slice(6).trim();
-            } else if (line.startsWith('data:')) {
-              try {
-                const data = JSON.parse(line.slice(5).trim());
-                handleSSEEvent(eventType, data);
-              } catch (err) { /* skip malformed */ }
-            }
-          }
+          processLines(lines);
         }
+        // Stream closed: handle anything left without a trailing blank line
+        buffer += decoder.decode();
+        processLines(buffer ? [buffer] : []);
+        dispatch();
       })
       .catch((err) => {
         if (err.name !== 'AbortError') setError(err.message);
@@ -394,16 +417,16 @@ function App() {
               <h2>Ask questions about your files</h2>
               <p>Answers in this mode use your uploaded files only.</p>
             </div>
-            <span className="upload-format">TXT · MD · max 5 MB each</span>
+            <span className="upload-format">TXT · MD · PDF · DOCX · MP3 · max 5 MB each</span>
           </div>
           <form className="upload-form" onSubmit={handleUpload}>
             <input
               type="file"
               name="files"
-              accept=".txt,.md,text/plain,text/markdown"
+              accept=".txt,.md,.pdf,.docx,.mp3,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,audio/mpeg"
               multiple
               disabled={uploading || creatingWorkspace || !corpusId}
-              aria-label="Choose text or Markdown files"
+              aria-label="Choose text, Markdown, PDF, Word or MP3 files"
             />
             <button type="submit" className="upload-button" disabled={uploading || creatingWorkspace || !corpusId}>
               {creatingWorkspace ? 'Preparing workspace…' : uploading ? 'Indexing…' : 'Upload and index'}
@@ -640,7 +663,7 @@ function App() {
           <p>Powered by Milvus Vector DB, Neo4j Knowledge Graph &amp; LangGraph Pregel Engine</p>
           <p className="empty-hint">
             {mode === 'files' && !uploadedFiles.length
-              ? 'Upload one or more text or Markdown files to get started'
+              ? 'Upload text, Markdown, PDF, Word (.docx) or MP3 audio files to get started'
               : 'Type a question above to start searching'}
           </p>
         </div>

@@ -18,3 +18,12 @@ torch==2.6.0+cpu
 sentence_transformers
 networkx
 boto3
+# Text extraction for .pdf and .docx uploads
+pypdf
+python-docx
+# Speech-to-text for .mp3 uploads (bundles its own ffmpeg via PyAV; no system ffmpeg needed)
+faster-whisper
+# faster-whisper 1.2.x passes av.open(metadata_errors=...), which PyAV 16+ removed
+av<16
+# Windows: CTranslate2 4.6+ and onnxruntime need the Visual C++ 2015-2022 runtime >= 14.40;
+# older runtimes crash with an access violation when the Whisper model loads.

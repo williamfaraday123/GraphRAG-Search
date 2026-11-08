@@ -3,6 +3,7 @@ from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from retriever import HybridRetriever
+from document_text import display_name
 import networkx as nx
 import logging
 import os
@@ -280,7 +281,8 @@ def _format_context_by_file(chunks: List[dict]) -> str:
     for n, (source, file_chunks) in enumerate(files.items(), start=1):
         if all(_chunk_position(c) is not None for c in file_chunks):
             file_chunks = sorted(file_chunks, key=_chunk_position)
-        name = source.rsplit("/", 1)[-1]  # s3://bucket/uploads/<corpus>/<file_id>/name.txt -> name.txt
+        # s3://bucket/uploads/<corpus>/<file_id>/report.pdf.txt -> report.pdf
+        name = display_name(source.rsplit("/", 1)[-1])
         body = "\n[...]\n".join((c.get("content") or "").strip() for c in file_chunks)
         sections.append(f"=== File {n}: {name} ===\n{body}")
     return "\n\n".join(sections)

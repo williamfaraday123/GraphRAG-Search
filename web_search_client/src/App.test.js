@@ -111,6 +111,49 @@ test('deletes selected files after confirmation', async () => {
     expect.stringContaining(`/files/${FILES[0].fileId}`), { method: 'DELETE' });
 });
 
+test('shows a transcription notice while an MP3 is uploading', async () => {
+  await openMyFiles();
+  let finishUpload;
+  global.fetch.mockImplementationOnce(() => new Promise((resolve) => { finishUpload = resolve; }));
+
+  const input = screen.getByLabelText('Choose text, Markdown, PDF, Word or MP3 files');
+  fireEvent.change(input, { target: { files: [new File(['ID3'], 'lecture.mp3', { type: 'audio/mpeg' })] } });
+  fireEvent.submit(input.closest('form'));
+
+  expect(screen.getByText(/Transcribing audio before indexing/)).toBeInTheDocument();
+  await act(async () => {
+    finishUpload({ ok: true, json: () => Promise.resolve({ files: [
+      { success: true, fileId: '33333333-3333-4333-8333-333333333333', filename: 'lecture.mp3', chunkCount: 2 },
+    ] }) });
+  });
+  expect(await screen.findByLabelText('Select lecture.mp3')).toBeInTheDocument();
+  expect(screen.getByText('1 file indexed and ready.')).toBeInTheDocument();
+});
+
+test('shows evidence when the done event arrives split across several reads', async () => {
+  global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
+  await openMyFiles();
+  const done = JSON.stringify({
+    answer: 'Both cite capital.', sources: [], confidence: 0.95,
+    chunks: [{ chunkId: 'c1', content: 'x'.repeat(20000), source: 's3://rag/a.pdf',
+      milvusScore: 0.9, pagerankScore: 0.1, hybridScore: 0.5 }],
+  });
+  const stream = `event:chunk\ndata:{"content":"Both "}\n\nevent:done\ndata:${done}\n\n`;
+  // Cut so "event:done" lands in one read and its data line in later ones
+  const cut = stream.indexOf('data:', stream.indexOf('event:done')) + 10;
+  const parts = [stream.slice(0, cut), stream.slice(cut, cut + 8000), stream.slice(cut + 8000)];
+  const reads = parts.map((p) => ({ done: false, value: new Uint8Array(Buffer.from(p)) }));
+  global.fetch.mockImplementationOnce(() => Promise.resolve({
+    ok: true,
+    body: { getReader: () => ({ read: () => Promise.resolve(reads.shift() || { done: true }) }) },
+  }));
+
+  fireEvent.change(screen.getByPlaceholderText(/uploaded files/), { target: { value: 'Which reasons?' } });
+  fireEvent.submit(screen.getByPlaceholderText(/uploaded files/).closest('form'));
+
+  expect(await screen.findByText('Evidence (1 chunks)')).toBeInTheDocument();
+});
+
 test('does not delete when the confirmation is cancelled', async () => {
   window.confirm = jest.fn(() => false);
   await openMyFiles();

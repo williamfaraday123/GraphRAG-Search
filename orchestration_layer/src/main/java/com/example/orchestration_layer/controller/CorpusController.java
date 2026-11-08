@@ -56,8 +56,8 @@ public class CorpusController {
                 if (file.getSize() > MAX_FILE_BYTES) {
                     throw new IllegalArgumentException("Files must be 5 MB or smaller");
                 }
-                if (filename == null || !filename.toLowerCase().matches(".*\\.(txt|md)$")) {
-                    throw new IllegalArgumentException("Only .txt and .md files are supported");
+                if (filename == null || !filename.toLowerCase().matches(".*\\.(txt|md|pdf|docx|mp3)$")) {
+                    throw new IllegalArgumentException("Only .txt, .md, .pdf, .docx and .mp3 files are supported");
                 }
 
                 QueryProto.UploadCorpusFileResponse response = grpcClient.uploadCorpusFile(
