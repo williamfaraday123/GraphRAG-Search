@@ -21,6 +21,8 @@ public class SearchEvent {
     private List<String> sources; // for DONE: citation sources
     private double confidence;    // for DONE: confidence score
     private List<Map<String, Object>> chunks; // for DONE: ranked evidence chunks
+    private List<Map<String, Object>> graphPaths; // for DONE: knowledge-graph fact paths behind the answer
+    private List<String> graphSeeds;  // for DONE: entities named in the question that the graph walk started from
     private String agentName;     // for AGENT_STEP: which agent acted (planner/retriever/analyst/synthesizer)
     private String agentDetail;   // for AGENT_STEP: what it did/decided
 
@@ -88,6 +90,10 @@ public class SearchEvent {
     public void setConfidence(double confidence) { this.confidence = confidence; }
     public List<Map<String, Object>> getChunks() { return chunks; }
     public void setChunks(List<Map<String, Object>> chunks) { this.chunks = chunks; }
+    public List<Map<String, Object>> getGraphPaths() { return graphPaths; }
+    public void setGraphPaths(List<Map<String, Object>> graphPaths) { this.graphPaths = graphPaths; }
+    public List<String> getGraphSeeds() { return graphSeeds; }
+    public void setGraphSeeds(List<String> graphSeeds) { this.graphSeeds = graphSeeds; }
     public String getAgentName() { return agentName; }
     public void setAgentName(String agentName) { this.agentName = agentName; }
     public String getAgentDetail() { return agentDetail; }

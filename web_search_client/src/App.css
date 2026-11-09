@@ -591,3 +591,43 @@ body {
 .evidence-actions { display: flex; gap: 16px; flex-wrap: wrap; }
 .evidence-item { transition: border-color 0.15s; }
 .evidence-item.in-map { border-color: var(--text); }
+
+/* Knowledge-graph reasoning path */
+.score-graph { background: rgba(57, 135, 229, 0.14); color: #8cbcf5; }
+.evidence-badge-graph {
+  background: rgba(57, 135, 229, 0.14);
+  border-color: rgba(57, 135, 229, 0.4);
+  color: #8cbcf5;
+}
+.graph-reasoning {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  margin-top: 8px;
+}
+.graph-reasoning-header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.graph-reasoning-note { color: var(--text-muted); font-size: 0.8rem; margin: -4px 0 10px; }
+.graph-paths { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.graph-path {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s;
+}
+.graph-path.in-map { border-color: var(--text); }
+.graph-path .evidence-toggle { white-space: nowrap; }
+.graph-fact { font-size: 0.86rem; color: var(--text); }
+.graph-fact + .graph-fact { margin-top: 4px; }
+.graph-fact-then {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 6px;
+}
+.graph-fact-file { color: var(--text-muted); font-size: 0.78rem; }
+.fact-relation { color: var(--text-muted); font-style: italic; }

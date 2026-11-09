@@ -12,6 +12,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import com.google.protobuf.ByteString;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -84,21 +85,44 @@ public class GrpcQueryClient {
                     var a = response.getAnswer();
                     List<Map<String, Object>> chunks = new ArrayList<>();
                     for (var c : a.getChunksList()) {
-                        chunks.add(Map.of(
-                                "chunkId", c.getChunkId(),
-                                "content", c.getContent(),
-                                "source", c.getSource(),
-                                "milvusScore", c.getMilvusScore(),
-                                "pagerankScore", c.getPagerankScore(),
-                                "hybridScore", c.getHybridScore()
-                        ));
+                        Map<String, Object> chunk = new LinkedHashMap<>();
+                        chunk.put("chunkId", c.getChunkId());
+                        chunk.put("content", c.getContent());
+                        chunk.put("source", c.getSource());
+                        chunk.put("milvusScore", c.getMilvusScore());
+                        chunk.put("pagerankScore", c.getPagerankScore());
+                        chunk.put("graphScore", c.getGraphScore());
+                        chunk.put("foundByGraph", c.getFoundByGraph());
+                        chunk.put("hybridScore", c.getHybridScore());
+                        chunks.add(chunk);
                     }
-                    eventConsumer.accept(SearchEvent.done(
+                    List<Map<String, Object>> graphPaths = new ArrayList<>();
+                    for (var p : a.getGraphPathsList()) {
+                        List<Map<String, Object>> facts = new ArrayList<>();
+                        for (var f : p.getFactsList()) {
+                            Map<String, Object> fact = new LinkedHashMap<>();
+                            fact.put("source", f.getSource());
+                            fact.put("sourceLabel", f.getSourceLabel());
+                            fact.put("relation", f.getRelation());
+                            fact.put("target", f.getTarget());
+                            fact.put("targetLabel", f.getTargetLabel());
+                            fact.put("chunkId", f.getChunkId());
+                            fact.put("fileId", f.getFileId());
+                            fact.put("filename", f.getFilename());
+                            fact.put("evidence", f.getEvidence());
+                            facts.add(fact);
+                        }
+                        graphPaths.add(Map.of("score", p.getScore(), "facts", facts));
+                    }
+                    var done = SearchEvent.done(
                             a.getText(),
                             a.getSourcesList(),
                             a.getConfidenceScore(),
                             chunks
-                    ));
+                    );
+                    done.setGraphPaths(graphPaths);
+                    done.setGraphSeeds(a.getGraphSeedsList());
+                    eventConsumer.accept(done);
                 } else if (response.hasAgentStep()) {
                     var s = response.getAgentStep();
                     eventConsumer.accept(SearchEvent.agentStep(s.getAgent(), s.getDetail()));

@@ -27,9 +27,12 @@ function App() {
   const [fileActionError, setFileActionError] = useState(null);
   const selectAllRef = useRef(null);
   const [showMap, setShowMap] = useState(false);
-  // Evidence chunk whose entities the corpus map highlights: while hovered, or pinned by "Show in map"
-  const [hoverChunkId, setHoverChunkId] = useState(null);
-  const [pinnedChunkId, setPinnedChunkId] = useState(null);
+  // What the corpus map highlights (an evidence chunk or a reasoning path): while hovered,
+  // or pinned by "Show in map". { key, kind, anchorId, chunkId | facts }
+  const [hoverHighlight, setHoverHighlight] = useState(null);
+  const [pinnedHighlight, setPinnedHighlight] = useState(null);
+  const [graphPaths, setGraphPaths] = useState([]);
+  const [graphSeeds, setGraphSeeds] = useState([]);
   const [scrollToMap, setScrollToMap] = useState(0);
   const mapRef = useRef(null);
   const [status, setStatus] = useState(null);
@@ -89,8 +92,10 @@ function App() {
     setConfidence(null);
     setError(null);
     setDone(false);
-    setHoverChunkId(null);
-    setPinnedChunkId(null);
+    setHoverHighlight(null);
+    setPinnedHighlight(null);
+    setGraphPaths([]);
+    setGraphSeeds([]);
   }, []);
 
   const mapOpen = showMap && mode === 'files';
@@ -102,27 +107,41 @@ function App() {
     }
   }, [scrollToMap]);
 
-  const toggleShowInMap = useCallback((chunkId) => {
-    if (pinnedChunkId === chunkId) {
-      setPinnedChunkId(null);
+  const toggleShowInMap = useCallback((highlight) => {
+    if (pinnedHighlight?.key === highlight.key) {
+      setPinnedHighlight(null);
       return;
     }
-    setPinnedChunkId(chunkId);
-    setHoverChunkId(null);
+    setPinnedHighlight(highlight);
+    setHoverHighlight(null);
     setShowMap(true);
     setScrollToMap((n) => n + 1);
-  }, [pinnedChunkId]);
+  }, [pinnedHighlight]);
 
   const backToEvidence = useCallback(() => {
-    const item = pinnedChunkId && document.getElementById(`evidence-${pinnedChunkId}`);
+    const item = pinnedHighlight && document.getElementById(pinnedHighlight.anchorId);
     if (item) item.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, [pinnedChunkId]);
+  }, [pinnedHighlight]);
 
   const closeMap = useCallback(() => {
     setShowMap(false);
-    setPinnedChunkId(null);
-    setHoverChunkId(null);
+    setPinnedHighlight(null);
+    setHoverHighlight(null);
   }, []);
+
+  // Hover handlers that highlight something in the open corpus map
+  const hoverProps = (highlight) => (mapOpen
+    ? {
+      onMouseEnter: () => setHoverHighlight(highlight),
+      onMouseLeave: () => setHoverHighlight(null),
+      onFocus: () => setHoverHighlight(highlight),
+      onBlur: () => setHoverHighlight(null),
+    }
+    : {});
+  const chunkHighlight = (chunkId) => ({ key: `chunk:${chunkId}`, kind: 'chunk', chunkId, anchorId: `evidence-${chunkId}` });
+  const pathHighlight = (index) => (index === 'all'
+    ? { key: 'path:all', kind: 'path', facts: graphPaths.flatMap((p) => p.facts), anchorId: 'graph-reasoning' }
+    : { key: `path:${index}`, kind: 'path', facts: graphPaths[index].facts, anchorId: `graph-path-${index}` });
 
   const chooseMode = useCallback(async (nextMode) => {
     setMode(nextMode);
@@ -358,6 +377,8 @@ function App() {
         setIsLoading(false);
         setSources(data.sources || []);
         setChunks(data.chunks || []);
+        setGraphPaths(data.graphPaths || []);
+        setGraphSeeds(data.graphSeeds || []);
         setConfidence(data.confidence);
         break;
       case 'error':
@@ -399,7 +420,12 @@ function App() {
 
   const formatSourceLabel = (source) => {
     if (!source) return 'Unknown source';
-    return source.startsWith('s3://') ? source.slice('s3://'.length) : source;
+    const path = source.startsWith('s3://') ? source.slice('s3://'.length) : source;
+    // Uploads (bucket/uploads/<corpus>/<file>/<name>): show the file name. Text is stored as
+    // "<original>.txt" (report.pdf.txt), reversed like document_text.display_name.
+    const upload = path.match(/\/uploads\/[^/]+\/[^/]+\/([^/]+)$/);
+    if (!upload) return path;
+    return upload[1].replace(/(\.(?:txt|md|pdf|docx|mp3))\.txt$/i, '$1');
   };
 
   const topAuthorityIndex = chunks.length > 0
@@ -568,9 +594,9 @@ function App() {
                     files={uploadedFiles}
                     scopeFileIds={uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)}
                     onClose={closeMap}
-                    hoverChunkId={hoverChunkId}
-                    pinnedChunkId={pinnedChunkId}
-                    onClearPinned={() => setPinnedChunkId(null)}
+                    hoverHighlight={hoverHighlight}
+                    pinnedHighlight={pinnedHighlight}
+                    onClearPinned={() => setPinnedHighlight(null)}
                     onBackToEvidence={backToEvidence}
                   />
                 </div>
@@ -661,6 +687,63 @@ function App() {
             </div>
           )}
 
+          {done && graphPaths.length > 0 && (
+            <div className="graph-reasoning" id="graph-reasoning" aria-labelledby="graph-reasoning-title">
+              <div className="graph-reasoning-header">
+                <h3 className="evidence-label" id="graph-reasoning-title">Reasoning path</h3>
+                {mode === 'files' && (
+                  <button
+                    type="button"
+                    className="evidence-toggle"
+                    aria-pressed={pinnedHighlight?.key === 'path:all'}
+                    onClick={() => toggleShowInMap(pathHighlight('all'))}
+                  >
+                    {pinnedHighlight?.key === 'path:all' ? 'Stop highlighting in map' : 'Show all in map'}
+                  </button>
+                )}
+              </div>
+              <p className="graph-reasoning-note">
+                Facts the knowledge graph followed{graphSeeds.length ? ` from ${graphSeeds.join(', ')}` : ''} to
+                find the evidence below. They were extracted automatically and given to the model with the
+                text, so check them against the evidence.
+              </p>
+              <ol className="graph-paths">
+                {graphPaths.map((path, i) => {
+                  const pinned = pinnedHighlight?.key === `path:${i}`;
+                  return (
+                    <li
+                      key={i}
+                      id={`graph-path-${i}`}
+                      className={`graph-path ${pinned ? 'in-map' : ''}`}
+                      {...(mode === 'files' ? hoverProps(pathHighlight(i)) : {})}
+                    >
+                      <div className="graph-path-facts">
+                        {path.facts.map((f, j) => (
+                          <p key={j} className="graph-fact">
+                            {j > 0 && <span className="graph-fact-then">then</span>}
+                            <strong>{f.sourceLabel}</strong> <span className="fact-relation">{f.relation}</span>{' '}
+                            <strong>{f.targetLabel}</strong>
+                            <span className="graph-fact-file" title={f.evidence}> · {f.filename}</span>
+                          </p>
+                        ))}
+                      </div>
+                      {mode === 'files' && (
+                        <button
+                          type="button"
+                          className="evidence-toggle"
+                          aria-pressed={pinned}
+                          onClick={() => toggleShowInMap(pathHighlight(i))}
+                        >
+                          {pinned ? 'Stop highlighting' : 'Show in map'}
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          )}
+
           {done && chunks.length > 0 && (
             <div className="evidence-section">
               <h3 className="evidence-label">Evidence ({chunks.length} chunks)</h3>
@@ -674,25 +757,23 @@ function App() {
                   const cached = c.source ? sourceCache[c.source] : null;
                   const isExpanded = expandedChunks.has(i);
                   const mappable = mode === 'files' && Boolean(c.chunkId);
-                  const pinned = mappable && pinnedChunkId === c.chunkId;
-                  const highlight = mappable && mapOpen
-                    ? {
-                      onMouseEnter: () => setHoverChunkId(c.chunkId),
-                      onMouseLeave: () => setHoverChunkId(null),
-                      onFocus: () => setHoverChunkId(c.chunkId),
-                      onBlur: () => setHoverChunkId(null),
-                    }
-                    : {};
+                  const pinned = mappable && pinnedHighlight?.key === `chunk:${c.chunkId}`;
                   return (
                     <li
                       key={c.chunkId || i}
                       id={c.chunkId ? `evidence-${c.chunkId}` : undefined}
                       className={`evidence-item ${pinned ? 'in-map' : ''}`}
-                      {...highlight}
+                      {...(mappable ? hoverProps(chunkHighlight(c.chunkId)) : {})}
                     >
                       <div className="evidence-header">
                         {i === topAuthorityIndex && (
                           <span className="evidence-badge">🏆 Top Authority</span>
+                        )}
+                        {c.foundByGraph && (
+                          <span className="evidence-badge evidence-badge-graph"
+                            title="Vector search did not return this chunk; a knowledge-graph fact path led to it">
+                            Found via knowledge graph
+                          </span>
                         )}
                         <span className="evidence-source">{formatSourceLabel(c.source)}</span>
                       </div>
@@ -700,6 +781,9 @@ function App() {
                       <div className="evidence-scores">
                         <span className="score-pill score-semantic">Semantic {Math.round((c.milvusScore || 0) * 100)}%</span>
                         <span className="score-pill score-authority">Authority {Math.round((c.pagerankScore || 0) * 100)}%</span>
+                        {c.graphScore > 0 && (
+                          <span className="score-pill score-graph">Graph {Math.round(c.graphScore * 100)}%</span>
+                        )}
                         <span className="score-pill score-hybrid">Hybrid {Math.round((c.hybridScore || 0) * 100)}%</span>
                       </div>
                       <div className="evidence-actions">
@@ -717,7 +801,7 @@ function App() {
                             type="button"
                             className="evidence-toggle"
                             aria-pressed={pinned}
-                            onClick={() => toggleShowInMap(c.chunkId)}
+                            onClick={() => toggleShowInMap(chunkHighlight(c.chunkId))}
                           >
                             {pinned ? 'Stop highlighting in map' : 'Show in map'}
                           </button>

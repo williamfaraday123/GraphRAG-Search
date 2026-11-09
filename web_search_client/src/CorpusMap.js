@@ -23,8 +23,10 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 function CorpusMap({
   apiBase, corpusId, files, scopeFileIds, onClose,
-  // Evidence chunk to highlight: hovered in the Evidence section, or pinned with "Show in map"
-  hoverChunkId = null, pinnedChunkId = null, onClearPinned, onBackToEvidence,
+  // What to highlight, from the results below the map: hovered, or pinned with "Show in map".
+  //   { key, kind: 'chunk', chunkId }                    an evidence chunk's entities and facts
+  //   { key, kind: 'path', facts: [{source, target, relation, ...}] }   a knowledge-graph reasoning path
+  hoverHighlight = null, pinnedHighlight = null, onClearPinned, onBackToEvidence,
 }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [tab, setTab] = useState('entities');
@@ -93,23 +95,44 @@ function CorpusMap({
     return map;
   }, [visibleLinks]);
 
-  // A newly pinned evidence chunk replaces the current selection so its highlight shows
+  // A newly pinned highlight replaces the current selection so it shows
+  const pinnedKey = pinnedHighlight?.key;
   useEffect(() => {
-    if (!pinnedChunkId) return;
+    if (!pinnedKey) return;
     setSelectedId(null);
     setTab('entities');
     setTypeFilter('all');
-  }, [pinnedChunkId]);
+  }, [pinnedKey]);
 
-  const evidenceChunkId = hoverChunkId || pinnedChunkId;
+  const active = hoverHighlight || pinnedHighlight;
+  const showingPinned = Boolean(pinnedHighlight) && !hoverHighlight;
+  const evidenceChunkId = active?.kind === 'chunk' ? active.chunkId : null;
   const evidence = useMemo(() => {
-    if (!evidenceChunkId || !data) return null;
-    const ids = new Set(visibleEntities.filter((e) => e.chunkIds.includes(evidenceChunkId)).map((e) => e.id));
+    if (!active || !data) return null;
+    if (active.kind === 'path') {
+      // Entities and lines on a reasoning path; relation per line (either direction)
+      const keys = [...new Set(active.facts.flatMap((f) => [f.source, f.target]))];
+      const relation = {};
+      active.facts.forEach((f) => {
+        relation[`${f.source}|${f.target}`] = f.relation;
+        relation[`${f.target}|${f.source}`] = f.relation;
+      });
+      return {
+        kind: 'path',
+        facts: active.facts,
+        ids: new Set(keys.filter((k) => visibleIds.has(k))),
+        missing: keys.filter((k) => !entityById[k]).length,
+        inMap: keys.some((k) => entityById[k]),
+        relation,
+      };
+    }
+    const ids = new Set(visibleEntities.filter((e) => e.chunkIds.includes(active.chunkId)).map((e) => e.id));
     const factCount = isKg
-      ? visibleLinks.reduce((n, r) => n + r.examples.filter((ex) => ex.chunkId === evidenceChunkId).length, 0)
+      ? visibleLinks.reduce((n, r) => n + r.examples.filter((ex) => ex.chunkId === active.chunkId).length, 0)
       : 0;
-    return { chunkId: evidenceChunkId, chunk: data.chunks?.[evidenceChunkId], ids, factCount };
-  }, [evidenceChunkId, data, visibleEntities, visibleLinks, isKg]);
+    const chunk = data.chunks?.[active.chunkId];
+    return { kind: 'chunk', chunk, ids, factCount, inMap: Boolean(chunk) };
+  }, [active, data, visibleEntities, visibleLinks, visibleIds, entityById, isKg]);
 
   const focusId = hover?.id || selectedId;
   const focusSet = useMemo(() => {
@@ -117,7 +140,7 @@ function CorpusMap({
     return new Set([focusId, ...(neighbours[focusId] || []).map((n) => n.id)]);
   }, [focusId, neighbours]);
   // Hovering or selecting an entity in the map takes over from the evidence highlight
-  const evidenceSet = !focusId && evidence?.chunk ? evidence.ids : null;
+  const evidenceSet = !focusId && evidence?.inMap ? evidence.ids : null;
   const emphasis = focusSet || evidenceSet;
 
   // Labels are placed greedily, highest priority first (focused entity and its
@@ -145,14 +168,26 @@ function CorpusMap({
     return { shown, boxes: placed };
   }, [visibleEntities, focusId, emphasis]);
 
-  // Line state: focused entity's lines, or lines with a fact/sentence from the evidence chunk
+  // Line state: focused entity's lines, lines with a fact/sentence from the evidence chunk,
+  // or the lines on a reasoning path
   const linkState = (r) => {
     if (focusId) return r.source === focusId || r.target === focusId ? 'active' : 'dim';
     if (evidenceSet) {
-      if (r.examples.some((ex) => ex.chunkId === evidenceChunkId)) return 'active';
+      const onIt = evidence.kind === 'path'
+        ? Boolean(evidence.relation[`${r.source}|${r.target}`])
+        : r.examples.some((ex) => ex.chunkId === evidenceChunkId);
+      if (onIt) return 'active';
       return evidenceSet.has(r.source) && evidenceSet.has(r.target) ? '' : 'dim';
     }
     return '';
+  };
+  // Relation shown on a highlighted line: the path's fact, the evidence chunk's fact, or the strongest
+  const lineRelation = (r) => {
+    if (evidenceSet && !focusId) {
+      if (evidence.kind === 'path') return evidence.relation[`${r.source}|${r.target}`];
+      return r.examples.find((ex) => ex.chunkId === evidenceChunkId)?.relation;
+    }
+    return r.examples[0]?.relation;
   };
 
   // Relation labels on the highlighted lines (KG mode). An evidence chunk can light up many
@@ -171,11 +206,9 @@ function CorpusMap({
     ];
     visibleLinks.forEach((r) => {
       if (linkState(r) !== 'active') return;
-      const fact = evidenceSet && !focusId
-        ? r.examples.find((ex) => ex.chunkId === evidenceChunkId)
-        : r.examples[0];
-      if (!fact?.relation) return;
-      const text = fact.relation.length > 28 ? `${fact.relation.slice(0, 27)}…` : fact.relation;
+      const relation = lineRelation(r);
+      if (!relation) return;
+      const text = relation.length > 28 ? `${relation.slice(0, 27)}…` : relation;
       const a = pos(entityById[r.source]);
       const b = pos(entityById[r.target]);
       const x = (a.x + b.x) / 2;
@@ -251,8 +284,18 @@ function CorpusMap({
       {data && evidence && (
         <div className="corpus-map-evidence" role="status">
           <p>
-            {!evidence.chunk ? (
-              <>The {pinnedChunkId && !hoverChunkId ? 'selected' : 'hovered'} evidence chunk isn't in this map.
+            {evidence.kind === 'path' ? (
+              evidence.inMap ? (
+                <>
+                  <strong>Reasoning path:</strong> {plural(evidence.facts.length, 'fact')} linking{' '}
+                  {[...new Set(evidence.facts.flatMap((f) => [f.sourceLabel, f.targetLabel]))].join(', ')}.
+                  {evidence.missing > 0 && ` ${plural(evidence.missing, 'entity').replace('entitys', 'entities')} not in this map (rebuild with its file selected).`}
+                </>
+              ) : (
+                <>This reasoning path's entities aren't in this map. Rebuild with their files selected to see it.</>
+              )
+            ) : !evidence.chunk ? (
+              <>The {showingPinned ? 'selected' : 'hovered'} evidence chunk isn't in this map.
                 Rebuild with its file selected to see it.</>
             ) : (
               <>
@@ -266,10 +309,12 @@ function CorpusMap({
               </>
             )}
           </p>
-          {pinnedChunkId && !hoverChunkId && (
+          {showingPinned && (
             <div className="file-actions">
               {onBackToEvidence && (
-                <button type="button" className="file-action" onClick={onBackToEvidence}>Back to evidence</button>
+                <button type="button" className="file-action" onClick={onBackToEvidence}>
+                  {evidence.kind === 'path' ? 'Back to reasoning' : 'Back to evidence'}
+                </button>
               )}
               {onClearPinned && (
                 <button type="button" className="file-action" onClick={onClearPinned}>Clear</button>

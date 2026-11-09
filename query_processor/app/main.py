@@ -11,7 +11,7 @@ import query_pb2
 import query_pb2_grpc
 
 from retriever import HybridRetriever
-from graph_engine import build_query_graph
+from graph_engine import answer_paths, build_query_graph
 from corpus import normalize_corpus_id, normalize_file_id
 from corpus_indexer import CorpusIndexer
 from knowledge_graph import KnowledgeGraphBuilder
@@ -89,7 +89,9 @@ class QueryProcessorServicer:
                 "iteration_count": 0,
                 "messages": [],
                 "final_answer": "",
-                "graph_scores": {}
+                "graph_scores": {},
+                "kg_paths": [],
+                "kg_seeds": [],
             }
 
             # Stream node-by-node instead of a single blocking invoke() so each
@@ -139,6 +141,19 @@ class QueryProcessorServicer:
                 chunk_info.milvus_score = c.get("milvus_score", 0.0)
                 chunk_info.pagerank_score = c.get("pagerank_score", 0.0)
                 chunk_info.hybrid_score = c.get("hybrid_score", 0.0)
+                chunk_info.graph_score = c.get("graph_score", 0.0)
+                chunk_info.found_by_graph = bool(c.get("found_by_graph"))
+
+            # Knowledge-graph paths the answer model was given (their facts' chunks are in its context)
+            for path in answer_paths(state_acc):
+                path_msg = final_resp.answer.graph_paths.add()
+                path_msg.score = path["score"]
+                for f in path["facts"]:
+                    fact = path_msg.facts.add()
+                    for field in ("source", "source_label", "relation", "target", "target_label",
+                                  "chunk_id", "file_id", "filename", "evidence"):
+                        setattr(fact, field, f.get(field) or "")
+            final_resp.answer.graph_seeds.extend(state_acc.get("kg_seeds") or [])
 
             yield final_resp
 

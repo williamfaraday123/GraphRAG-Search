@@ -87,7 +87,10 @@ public class SearchController {
                                         "answer", event.getAnswer(),
                                         "sources", event.getSources(),
                                         "confidence", event.getConfidence(),
-                                        "chunks", event.getChunks()
+                                        "chunks", event.getChunks(),
+                                        // Knowledge-graph fact paths behind the answer, and where the walk started
+                                        "graphPaths", event.getGraphPaths() == null ? List.of() : event.getGraphPaths(),
+                                        "graphSeeds", event.getGraphSeeds() == null ? List.of() : event.getGraphSeeds()
                                 )));
                         emitter.complete();
                     }

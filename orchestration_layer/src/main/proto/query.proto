@@ -60,6 +60,27 @@ message FinalAnswer {
   repeated string sources = 2;
   float confidence_score = 3;
   repeated ChunkInfo chunks = 4; // Ranked evidence chunks (highest hybrid_score first)
+  repeated GraphPath graph_paths = 5; // Knowledge-graph fact paths behind the answer's context (best first)
+  repeated string graph_seeds = 6;    // Entities named in the question that the graph walk started from
+}
+
+// 1-2 linked facts the graph walk followed, e.g. Hollywood overtook Europe -> Hollywood was backed by ...
+message GraphPath {
+  float score = 1;
+  repeated GraphFact facts = 2;
+}
+
+// One extracted fact: subject -relation-> object, with the sentence and chunk it came from
+message GraphFact {
+  string source = 1;        // entity key (matches corpus-map entity ids)
+  string source_label = 2;
+  string relation = 3;
+  string target = 4;
+  string target_label = 5;
+  string chunk_id = 6;
+  string file_id = 7;
+  string filename = 8;
+  string evidence = 9;      // the sentence the fact was extracted from
 }
 
 // One retrieved-and-ranked chunk, surfaced to the UI as "Evidence".
@@ -69,7 +90,9 @@ message ChunkInfo {
   string source = 3;         // raw object-storage URI, e.g. s3://rag-datasets/file.txt
   float milvus_score = 4;    // semantic similarity (normalized 0-1)
   float pagerank_score = 5;  // graph authority (normalized 0-1)
-  float hybrid_score = 6;    // 0.6 * milvus_score + 0.4 * pagerank_score
+  float hybrid_score = 6;    // 0.6 * milvus + 0.4 * pagerank; with graph paths 0.5 / 0.2 / 0.3 * graph
+  float graph_score = 7;     // relevance of the knowledge-graph fact paths through this chunk (0-1)
+  bool found_by_graph = 8;   // reached only through the knowledge graph, not by vector search
 }
 
 message ChunkSourceRequest {

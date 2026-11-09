@@ -27,6 +27,8 @@ class AgentState(TypedDict):
     messages: List[str]
     final_answer: str
     graph_scores: Dict[str, float]   # Stores PageRank scores for debugging/logging
+    kg_paths: List[dict]          # Knowledge-graph fact paths found across rounds (best first)
+    kg_seeds: List[str]           # Entities named in the queries that the walk started from
 
 # --- Helper: Graph Analysis ---
 def calculate_authority_scores(chunks: List[Dict], edges: List[Dict]) -> Dict[str, float]:
@@ -63,9 +65,27 @@ def _merge_chunks(existing: List[dict], new: List[dict]) -> List[dict]:
     merged = {c['id']: c for c in existing if c.get('id')}
     for c in new:
         cid = c.get('id')
-        if cid:
-            merged[cid] = c
+        if not cid:
+            continue
+        old = merged.get(cid)
+        if old:
+            # Same chunk from another round/query: keep its best scores; it counts as
+            # found by vector search if any round found it that way
+            c = {**c,
+                 'score': max(old.get('score', 0.0), c.get('score', 0.0)),
+                 'kg_score': max(old.get('kg_score', 0.0), c.get('kg_score', 0.0)),
+                 'found_by_graph': old.get('found_by_graph', False) and c.get('found_by_graph', False)}
+        merged[cid] = c
     return list(merged.values())
+
+
+def _merge_paths(existing: List[dict], new: List[dict]) -> List[dict]:
+    merged = {}
+    for path in existing + new:
+        key = tuple((f['source'], f['relation'], f['target'], f['chunk_id']) for f in path['facts'])
+        if key not in merged or path['score'] > merged[key]['score']:
+            merged[key] = path
+    return sorted(merged.values(), key=lambda p: -p['score'])
 
 def _merge_relations(existing: List[dict], new: List[dict]) -> List[dict]:
     merged = {(e.get('source'), e.get('target')): e for e in existing}
@@ -77,14 +97,20 @@ def _rank_chunks(chunks: List[dict], pr_scores: Dict[str, float]) -> List[dict]:
     ranked_chunks = []
     max_milvus = max([c.get('score', 0) for c in chunks]) if chunks else 1.0
     max_pr = max(pr_scores.values()) if pr_scores else 1.0
+    max_kg = max([c.get('kg_score', 0.0) for c in chunks], default=0.0)
 
     for chunk in chunks:
         cid = chunk.get('id')
         milvus_s = chunk.get('score', 0.0) / max_milvus if max_milvus else 0.0
         pr_s = pr_scores.get(cid, 0.0) / max_pr if pr_scores and max_pr else 0.0
+        kg_s = chunk.get('kg_score', 0.0) / max_kg if max_kg else 0.0
 
-        # Hybrid Weight: 60% Semantic, 40% Structural Authority
-        final_score = (0.6 * milvus_s) + (0.4 * pr_s)
+        if max_kg:
+            # Knowledge-graph paths found: 50% semantic, 20% authority, 30% fact-path relevance
+            final_score = (0.5 * milvus_s) + (0.2 * pr_s) + (0.3 * kg_s)
+        else:
+            # Hybrid Weight: 60% Semantic, 40% Structural Authority
+            final_score = (0.6 * milvus_s) + (0.4 * pr_s)
 
         ranked_chunks.append({
             "id": cid,
@@ -92,6 +118,8 @@ def _rank_chunks(chunks: List[dict], pr_scores: Dict[str, float]) -> List[dict]:
             "source": chunk.get('source'),
             "milvus_score": milvus_s,
             "pagerank_score": pr_s,
+            "graph_score": kg_s,
+            "found_by_graph": bool(chunk.get('found_by_graph')),
             "hybrid_score": final_score
         })
 
@@ -157,6 +185,8 @@ def make_retrieve_context_node(retriever: HybridRetriever):
 
         new_chunks = []
         new_relations = []
+        new_paths = []
+        seeds = list(state.get("kg_seeds") or [])
         for q in queries:
             result = retriever.search(
                 query=q,
@@ -166,9 +196,23 @@ def make_retrieve_context_node(retriever: HybridRetriever):
             )
             new_chunks.extend(result.get("chunks", []))
             new_relations.extend(result.get("relations", []))
+            new_paths.extend(result.get("kg_paths", []))
+            seeds += [s for s in result.get("kg_seeds", []) if s not in seeds]
 
         all_chunks = _merge_chunks(state.get("all_chunks", []), new_chunks)
         all_relations = _merge_relations(state.get("all_relations", []), new_relations)
+        kg_paths = _merge_paths(state.get("kg_paths") or [], new_paths)
+        # After merging: a chunk one sub-query reached through the graph may have been found
+        # by vector search in another, and then it doesn't count as graph-only
+        round_ids = {c.get("id") for c in new_chunks}
+        graph_only = sum(1 for c in all_chunks if c.get("id") in round_ids and c.get("found_by_graph"))
+        kg_note = ""
+        if new_paths:
+            kg_note = (
+                f" Knowledge graph: followed {len(new_paths)} fact path(s)"
+                + (f" from {', '.join(seeds)}" if seeds else "")
+                + (f", adding {graph_only} chunk(s) vector search missed." if graph_only else ".")
+            )
 
         pr_scores = calculate_authority_scores(all_chunks, all_relations)
         ranked_chunks = _rank_chunks(all_chunks, pr_scores)
@@ -179,11 +223,14 @@ def make_retrieve_context_node(retriever: HybridRetriever):
             "all_relations": all_relations,
             "refined_context": top_context,
             "graph_scores": pr_scores,
+            "kg_paths": kg_paths,
+            "kg_seeds": seeds,
             "search_queries": [],  # consumed — cleared until the critic sets new ones
             "messages": [
                 f"Retrieved {len(new_chunks)} new chunk(s) across {len(queries)} "
                 f"quer{'y' if len(queries) == 1 else 'ies'}. "
                 f"Top authoritative node: {top_context[0]['id'] if top_context else 'None'}"
+                + kg_note
             ]
         }
     return retrieve_context
@@ -280,6 +327,29 @@ def _format_context_by_file(chunks: List[dict]) -> str:
     return "\n\n".join(sections)
 
 
+def _fact_key(f):
+    return (f["source"], f["relation"], f["target"], f["chunk_id"])
+
+
+def answer_paths(state, limit: int = 6) -> List[dict]:
+    """Knowledge-graph paths whose every fact comes from a chunk in the answer's context.
+    A path whose facts all appear in another path is dropped (sub-queries each walk the
+    graph, so 'A overtook B' alone often repeats inside 'A overtook B, then C backed A')."""
+    in_context = {c["id"] for c in state.get("refined_context") or []}
+    paths = [p for p in state.get("kg_paths") or [] if all(f["chunk_id"] in in_context for f in p["facts"])]
+    fact_sets = [frozenset(_fact_key(f) for f in p["facts"]) for p in paths]
+    kept = [p for p, facts in zip(paths, fact_sets) if not any(facts < other for other in fact_sets)]
+    return kept[:limit]
+
+
+def format_kg_facts(paths: List[dict]) -> str:
+    lines = []
+    for p in paths:
+        steps = [f"{f['source_label']} {f['relation']} {f['target_label']} [{f['filename']}]" for f in p["facts"]]
+        lines.append("- " + " → then: ".join(steps))
+    return "\n".join(lines)
+
+
 def synthesize_answer(state: AgentState):
     """Step 3: Generate final response"""
     if not state["refined_context"]:
@@ -289,6 +359,13 @@ def synthesize_answer(state: AgentState):
     llm = chat_client("ANSWER_MODEL", temperature=0)
 
     context_text = _format_context_by_file(state["refined_context"])
+    facts_text = format_kg_facts(answer_paths(state))
+    if facts_text:
+        context_text += (
+            "\n\nConnections found in the knowledge graph (facts extracted automatically from the "
+            "files above; they show how things link across sentences and files, but may contain "
+            "errors, so confirm each against the file text before using it):\n" + facts_text
+        )
 
     # Checking each listed option against a quoted sentence stops the model picking
     # distractors that the text attributes to a different subject (tested on IELTS-style

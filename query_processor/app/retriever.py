@@ -4,6 +4,7 @@ from services.neo4j_client import Neo4jService
 from services.object_storage_client import ObjectStorageRetriever
 from embedding import EmbeddingService
 from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, WIKI_CORPUS_ID
+from graph_retrieval import GraphRetriever
 import logging
 import os
 
@@ -25,7 +26,9 @@ class HybridRetriever:
             aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "minioadmin"),
             endpoint_url=os.getenv("MINIO_ENDPOINT", "http://localhost:9000"),
         )
-        
+        # Follows facts extracted from uploads (knowledge_graph.py) to chunks vector search misses
+        self.graph_retriever = GraphRetriever(self.neo4j_service.driver, self.embedding_service)
+
         logger.info("HybridRetriever initialized with Milvus, Neo4j, MinIO, and Local Embeddings")
 
     def search(
@@ -81,7 +84,25 @@ class HybridRetriever:
         # --- Extract Node IDs for Sub-graph ---
         # Assumption: Your Milvus results have a field 'id' that matches Neo4j 'chunk_id'
         candidate_ids = [item['id'] for item in milvus_results if 'id' in item]
-        
+
+        # --- STEP 3a: Knowledge graph (upload workspaces) ---
+        # Walks extracted facts from entities in the question; adds the chunks behind the
+        # best fact paths, including ones vector search didn't return.
+        kg = {"seeds": [], "paths": [], "chunk_scores": {}, "chunks": [], "relations": []}
+        kg_search = os.getenv("KG_SEARCH_ENABLED", "true").lower() not in {"0", "false", "no"}
+        if corpus_id != WIKI_CORPUS_ID and kg_search:
+            try:
+                kg = self.graph_retriever.search(
+                    query, query_vector, corpus_id, file_ids=file_ids or None,
+                    vector_chunk_ids=candidate_ids, max_new_chunks=top_k,
+                )
+            except Exception as e:
+                logger.error(f"Knowledge-graph retrieval failed: {e}")
+        for item in milvus_results:
+            item["kg_score"] = kg["chunk_scores"].get(item.get("id"), 0.0)
+        milvus_results.extend(kg["chunks"])
+        candidate_ids += [c["id"] for c in kg["chunks"]]
+
         logger.info(f"Extracted {len(candidate_ids)} unique IDs for sub-graph construction")
 
         # Instead of keyword search, query Neo4j to find connections based on IDs from those chunks from milvus search
@@ -121,7 +142,9 @@ class HybridRetriever:
         return {
             "query_vector_dim": len(query_vector),
             "chunks": enriched_chunks, # the nodes (with content)
-            "relations": adjacency_matrix, # the edges
+            "relations": adjacency_matrix + kg["relations"], # the edges, incl. knowledge-graph paths
             "node_count": len(candidate_ids),
-            "edge_count": len(adjacency_matrix)
+            "edge_count": len(adjacency_matrix),
+            "kg_paths": kg["paths"],
+            "kg_seeds": kg["seeds"],
         }

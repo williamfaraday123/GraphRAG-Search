@@ -266,9 +266,9 @@ test('corpus map shows extracted facts with direction, evidence and extraction p
 });
 
 // Runs a search whose answer cites the given evidence chunks
-async function searchWithEvidence(evidence) {
+async function searchWithEvidence(evidence, extra = {}) {
   global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
-  const done = JSON.stringify({ answer: 'Hollywood overtook Europe.', sources: [], confidence: 0.9, chunks: evidence });
+  const done = JSON.stringify({ answer: 'Hollywood overtook Europe.', sources: [], confidence: 0.9, chunks: evidence, ...extra });
   const reads = [{ done: false, value: new Uint8Array(Buffer.from(`event:done\ndata:${done}\n\n`)) }];
   global.fetch.mockImplementationOnce(() => Promise.resolve({
     ok: true,
@@ -313,5 +313,56 @@ test('hovering an evidence chunk highlights its entities in the corpus map; Show
   fireEvent.mouseEnter(first);
   expect(ringed()).toEqual(['Hollywood', 'Europe']);
   fireEvent.mouseLeave(first);
+  expect(ringed()).toEqual([]);
+});
+
+test('shows the knowledge-graph reasoning path, marks graph-found evidence, and highlights a path in the map', async () => {
+  Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it
+  const fact = (source, sourceLabel, relation, target, targetLabel, chunkId, filename) =>
+    ({ source, sourceLabel, relation, target, targetLabel, chunkId, fileId: chunkId.split(':')[0], filename, evidence: 'x' });
+  const graphPaths = [
+    { score: 0.66, facts: [fact('hollywood', 'Hollywood', 'overtook', 'europe', 'Europe', `${CINEMA}:0`, 'cinema.txt')] },
+    { score: 0.44, facts: [
+      fact('hollywood', 'Hollywood', 'overtook', 'europe', 'Europe', `${CINEMA}:0`, 'cinema.txt'),
+      fact('united states government', 'United States government', 'supported', 'hollywood', 'Hollywood', `${TEA}:0`, 'tea.txt'),
+    ] },
+  ];
+  await openMyFiles();
+  await searchWithEvidence([
+    { chunkId: `${CINEMA}:0`, content: 'Hollywood overtook Europe.', source: `s3://rag/uploads/${CORPUS}/${CINEMA}/cinema.pdf.txt`, milvusScore: 0.4,
+      pagerankScore: 0.1, graphScore: 1, foundByGraph: true, hybridScore: 0.6 },
+    { chunkId: `${TEA}:7`, content: 'Other.', source: 's3://rag/y.txt', milvusScore: 1, pagerankScore: 0.2,
+      graphScore: 0, foundByGraph: false, hybridScore: 0.5 },
+  ], { graphPaths, graphSeeds: ['Europe'] });
+
+  // Reasoning section: start entity, each path written as facts, 2-hop path joined by "then"
+  expect(screen.getByRole('heading', { name: 'Reasoning path' })).toBeInTheDocument();
+  expect(screen.getByText(/followed from Europe/)).toBeInTheDocument();
+  const paths = document.querySelectorAll('.graph-path');
+  expect(paths).toHaveLength(2);
+  expect(paths[1]).toHaveTextContent('Hollywood overtook Europe · cinema.txtthenUnited States government supported Hollywood · tea.txt');
+
+  // Evidence: graph-found chunk is labelled and shows its graph score; the other has neither
+  const [first, second] = document.querySelectorAll('.evidence-item');
+  expect(within(first).getByText('Found via knowledge graph')).toBeInTheDocument();
+  expect(within(first).getByText('Graph 100%')).toBeInTheDocument();
+  expect(first.querySelector('.evidence-source')).toHaveTextContent(/^cinema\.pdf$/); // stored name shown as uploaded
+  expect(within(second).queryByText(/Found via knowledge graph|Graph \d/)).not.toBeInTheDocument();
+
+  // Show the 2-hop path in the map: its entities ringed, the missing one reported
+  fireEvent.click(within(paths[1]).getByRole('button', { name: 'Show in map' }));
+  const banner = await screen.findByText(/Reasoning path:/);
+  expect(banner.closest('p')).toHaveTextContent(
+    'Reasoning path: 2 facts linking Hollywood, Europe, United States government. 1 entity not in this map');
+  const ringed = () => [...document.querySelectorAll('.node.in-evidence')].map((n) => n.getAttribute('aria-label').split(',')[0]);
+  expect(ringed()).toEqual(['Hollywood', 'Europe']);
+  expect(screen.getByRole('button', { name: 'Back to reasoning' })).toBeInTheDocument();
+  expect(document.querySelector('.link.active')).not.toBeNull();
+
+  // Hovering the other path switches the highlight while hovered
+  fireEvent.mouseEnter(paths[0]);
+  expect(screen.getByText(/Reasoning path:/).closest('p')).toHaveTextContent('1 fact linking Hollywood, Europe.');
+  fireEvent.mouseLeave(paths[0]);
+  fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
   expect(ringed()).toEqual([]);
 });
