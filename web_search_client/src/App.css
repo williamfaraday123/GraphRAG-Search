@@ -584,3 +584,10 @@ body {
 .results-panel::-webkit-scrollbar-track { background: transparent; }
 .results-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 .results-panel::-webkit-scrollbar-thumb:hover { background: #444; }
+
+/* Corpus map <-> Evidence link */
+.corpus-map-anchor { scroll-margin-top: 16px; }
+.evidence-map-hint { color: var(--text-muted); font-size: 0.8rem; margin: -4px 0 10px; }
+.evidence-actions { display: flex; gap: 16px; flex-wrap: wrap; }
+.evidence-item { transition: border-color 0.15s; }
+.evidence-item.in-map { border-color: var(--text); }

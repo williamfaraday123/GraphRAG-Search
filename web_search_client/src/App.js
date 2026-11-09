@@ -27,6 +27,11 @@ function App() {
   const [fileActionError, setFileActionError] = useState(null);
   const selectAllRef = useRef(null);
   const [showMap, setShowMap] = useState(false);
+  // Evidence chunk whose entities the corpus map highlights: while hovered, or pinned by "Show in map"
+  const [hoverChunkId, setHoverChunkId] = useState(null);
+  const [pinnedChunkId, setPinnedChunkId] = useState(null);
+  const [scrollToMap, setScrollToMap] = useState(0);
+  const mapRef = useRef(null);
   const [status, setStatus] = useState(null);
   const [agentSteps, setAgentSteps] = useState([]);
   const [streamedText, setStreamedText] = useState('');
@@ -84,6 +89,39 @@ function App() {
     setConfidence(null);
     setError(null);
     setDone(false);
+    setHoverChunkId(null);
+    setPinnedChunkId(null);
+  }, []);
+
+  const mapOpen = showMap && mode === 'files';
+
+  // After "Show in map" the map may only just be mounting, so scroll once it exists
+  useEffect(() => {
+    if (scrollToMap && mapRef.current) {
+      mapRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [scrollToMap]);
+
+  const toggleShowInMap = useCallback((chunkId) => {
+    if (pinnedChunkId === chunkId) {
+      setPinnedChunkId(null);
+      return;
+    }
+    setPinnedChunkId(chunkId);
+    setHoverChunkId(null);
+    setShowMap(true);
+    setScrollToMap((n) => n + 1);
+  }, [pinnedChunkId]);
+
+  const backToEvidence = useCallback(() => {
+    const item = pinnedChunkId && document.getElementById(`evidence-${pinnedChunkId}`);
+    if (item) item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [pinnedChunkId]);
+
+  const closeMap = useCallback(() => {
+    setShowMap(false);
+    setPinnedChunkId(null);
+    setHoverChunkId(null);
   }, []);
 
   const chooseMode = useCallback(async (nextMode) => {
@@ -523,13 +561,19 @@ function App() {
                 </div>
               )}
               {showMap && (
-                <CorpusMap
-                  apiBase={API_BASE}
-                  corpusId={corpusId}
-                  files={uploadedFiles}
-                  scopeFileIds={uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)}
-                  onClose={() => setShowMap(false)}
-                />
+                <div ref={mapRef} className="corpus-map-anchor">
+                  <CorpusMap
+                    apiBase={API_BASE}
+                    corpusId={corpusId}
+                    files={uploadedFiles}
+                    scopeFileIds={uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)}
+                    onClose={closeMap}
+                    hoverChunkId={hoverChunkId}
+                    pinnedChunkId={pinnedChunkId}
+                    onClearPinned={() => setPinnedChunkId(null)}
+                    onBackToEvidence={backToEvidence}
+                  />
+                </div>
               )}
             </div>
           )}
@@ -620,12 +664,32 @@ function App() {
           {done && chunks.length > 0 && (
             <div className="evidence-section">
               <h3 className="evidence-label">Evidence ({chunks.length} chunks)</h3>
+              {mapOpen && (
+                <p className="evidence-map-hint">
+                  Hover over a chunk to highlight its entities in the corpus map, or use Show in map.
+                </p>
+              )}
               <ul className="evidence-list">
                 {chunks.map((c, i) => {
                   const cached = c.source ? sourceCache[c.source] : null;
                   const isExpanded = expandedChunks.has(i);
+                  const mappable = mode === 'files' && Boolean(c.chunkId);
+                  const pinned = mappable && pinnedChunkId === c.chunkId;
+                  const highlight = mappable && mapOpen
+                    ? {
+                      onMouseEnter: () => setHoverChunkId(c.chunkId),
+                      onMouseLeave: () => setHoverChunkId(null),
+                      onFocus: () => setHoverChunkId(c.chunkId),
+                      onBlur: () => setHoverChunkId(null),
+                    }
+                    : {};
                   return (
-                    <li key={c.chunkId || i} className="evidence-item">
+                    <li
+                      key={c.chunkId || i}
+                      id={c.chunkId ? `evidence-${c.chunkId}` : undefined}
+                      className={`evidence-item ${pinned ? 'in-map' : ''}`}
+                      {...highlight}
+                    >
                       <div className="evidence-header">
                         {i === topAuthorityIndex && (
                           <span className="evidence-badge">🏆 Top Authority</span>
@@ -638,15 +702,27 @@ function App() {
                         <span className="score-pill score-authority">Authority {Math.round((c.pagerankScore || 0) * 100)}%</span>
                         <span className="score-pill score-hybrid">Hybrid {Math.round((c.hybridScore || 0) * 100)}%</span>
                       </div>
-                      {c.source && (
-                        <button
-                          type="button"
-                          className="evidence-toggle"
-                          onClick={() => toggleChunkSource(c, i)}
-                        >
-                          {isExpanded ? 'Hide full source ▲' : 'View full source ▼'}
-                        </button>
-                      )}
+                      <div className="evidence-actions">
+                        {c.source && (
+                          <button
+                            type="button"
+                            className="evidence-toggle"
+                            onClick={() => toggleChunkSource(c, i)}
+                          >
+                            {isExpanded ? 'Hide full source ▲' : 'View full source ▼'}
+                          </button>
+                        )}
+                        {mappable && (
+                          <button
+                            type="button"
+                            className="evidence-toggle"
+                            aria-pressed={pinned}
+                            onClick={() => toggleShowInMap(c.chunkId)}
+                          >
+                            {pinned ? 'Stop highlighting in map' : 'Show in map'}
+                          </button>
+                        )}
+                      </div>
                       {isExpanded && (
                         <div className="evidence-full-source">
                           {cached?.loading && <span className="evidence-loading">Loading…</span>}

@@ -21,7 +21,11 @@ const radius = (e) => 5 + Math.sqrt(e.chunkCount) * 3;
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
+function CorpusMap({
+  apiBase, corpusId, files, scopeFileIds, onClose,
+  // Evidence chunk to highlight: hovered in the Evidence section, or pinned with "Show in map"
+  hoverChunkId = null, pinnedChunkId = null, onClearPinned, onBackToEvidence,
+}) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [tab, setTab] = useState('entities');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -89,18 +93,40 @@ function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
     return map;
   }, [visibleLinks]);
 
+  // A newly pinned evidence chunk replaces the current selection so its highlight shows
+  useEffect(() => {
+    if (!pinnedChunkId) return;
+    setSelectedId(null);
+    setTab('entities');
+    setTypeFilter('all');
+  }, [pinnedChunkId]);
+
+  const evidenceChunkId = hoverChunkId || pinnedChunkId;
+  const evidence = useMemo(() => {
+    if (!evidenceChunkId || !data) return null;
+    const ids = new Set(visibleEntities.filter((e) => e.chunkIds.includes(evidenceChunkId)).map((e) => e.id));
+    const factCount = isKg
+      ? visibleLinks.reduce((n, r) => n + r.examples.filter((ex) => ex.chunkId === evidenceChunkId).length, 0)
+      : 0;
+    return { chunkId: evidenceChunkId, chunk: data.chunks?.[evidenceChunkId], ids, factCount };
+  }, [evidenceChunkId, data, visibleEntities, visibleLinks, isKg]);
+
   const focusId = hover?.id || selectedId;
   const focusSet = useMemo(() => {
     if (!focusId) return null;
     return new Set([focusId, ...(neighbours[focusId] || []).map((n) => n.id)]);
   }, [focusId, neighbours]);
+  // Hovering or selecting an entity in the map takes over from the evidence highlight
+  const evidenceSet = !focusId && evidence?.chunk ? evidence.ids : null;
+  const emphasis = focusSet || evidenceSet;
 
   // Labels are placed greedily, highest priority first (focused entity and its
-  // neighbours, then the most mentioned), skipping any that would overlap one already placed.
-  const labelledIds = useMemo(() => {
+  // neighbours, or the evidence chunk's entities, then the most mentioned),
+  // skipping any that would overlap one already placed.
+  const { shown: labelledIds, boxes: labelBoxes } = useMemo(() => {
     const order = [
       ...(focusId ? [focusId] : []),
-      ...(focusSet ? visibleEntities.filter((e) => focusSet.has(e.id) && e.id !== focusId).map((e) => e.id) : []),
+      ...(emphasis ? visibleEntities.filter((e) => emphasis.has(e.id) && e.id !== focusId).map((e) => e.id) : []),
       ...visibleEntities.slice(0, ALWAYS_LABELLED).map((e) => e.id),
     ];
     const placed = [];
@@ -116,8 +142,52 @@ function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
       placed.push(box);
       shown.add(id);
     });
-    return shown;
-  }, [visibleEntities, focusId, focusSet]);
+    return { shown, boxes: placed };
+  }, [visibleEntities, focusId, emphasis]);
+
+  // Line state: focused entity's lines, or lines with a fact/sentence from the evidence chunk
+  const linkState = (r) => {
+    if (focusId) return r.source === focusId || r.target === focusId ? 'active' : 'dim';
+    if (evidenceSet) {
+      if (r.examples.some((ex) => ex.chunkId === evidenceChunkId)) return 'active';
+      return evidenceSet.has(r.source) && evidenceSet.has(r.target) ? '' : 'dim';
+    }
+    return '';
+  };
+
+  // Relation labels on the highlighted lines (KG mode). An evidence chunk can light up many
+  // facts at once, so each label is placed only where it overlaps no entity label or
+  // relation label already placed; skipped ones are still listed when an entity is selected.
+  const relationLabels = (() => {
+    const out = {};
+    if (!isKg) return out;
+    const taken = [
+      ...labelBoxes,
+      ...visibleEntities.map((e) => {
+        const p = pos(e);
+        const r = radius(e) + 4;
+        return { x1: p.x - r, x2: p.x + r, y1: p.y - r, y2: p.y + r };
+      }),
+    ];
+    visibleLinks.forEach((r) => {
+      if (linkState(r) !== 'active') return;
+      const fact = evidenceSet && !focusId
+        ? r.examples.find((ex) => ex.chunkId === evidenceChunkId)
+        : r.examples[0];
+      if (!fact?.relation) return;
+      const text = fact.relation.length > 28 ? `${fact.relation.slice(0, 27)}…` : fact.relation;
+      const a = pos(entityById[r.source]);
+      const b = pos(entityById[r.target]);
+      const x = (a.x + b.x) / 2;
+      const y = (a.y + b.y) / 2 - 4;
+      const w = text.length * CHAR_W * 0.9; // 10px italic
+      const box = { x1: x - w / 2, x2: x + w / 2, y1: y - 10, y2: y + 3 };
+      if (taken.some((t) => box.x1 < t.x2 && box.x2 > t.x1 && box.y1 < t.y2 && box.y2 > t.y1)) return;
+      taken.push(box);
+      out[`${r.source}|${r.target}`] = { x, y, text };
+    });
+    return out;
+  })();
   const maxWeight = Math.max(1, ...visibleLinks.map((r) => r.weight));
 
   const selectEntity = (id) => {
@@ -176,6 +246,37 @@ function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
       )}
       {data && !isKg && progress && !progress.enabled && (
         <p className="corpus-map-note">Fact extraction is turned off (KG_ENABLED=false): showing a keyword map.</p>
+      )}
+
+      {data && evidence && (
+        <div className="corpus-map-evidence" role="status">
+          <p>
+            {!evidence.chunk ? (
+              <>The {pinnedChunkId && !hoverChunkId ? 'selected' : 'hovered'} evidence chunk isn't in this map.
+                Rebuild with its file selected to see it.</>
+            ) : (
+              <>
+                <strong>Evidence:</strong> {evidence.chunk.filename} · chunk {evidence.chunk.chunkIndex + 1}.{' '}
+                {evidence.ids.size === 0
+                  ? (typeFilter === 'all' ? 'No mapped entities in this chunk.' : 'No entities of this type in this chunk.')
+                  : <>
+                    {plural(evidence.ids.size, 'entity').replace('entitys', 'entities')} highlighted
+                    {isKg ? `, ${plural(evidence.factCount, 'fact')} from this chunk` : ''}.
+                  </>}
+              </>
+            )}
+          </p>
+          {pinnedChunkId && !hoverChunkId && (
+            <div className="file-actions">
+              {onBackToEvidence && (
+                <button type="button" className="file-action" onClick={onBackToEvidence}>Back to evidence</button>
+              )}
+              {onClearPinned && (
+                <button type="button" className="file-action" onClick={onClearPinned}>Clear</button>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {data && (
@@ -242,7 +343,8 @@ function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
                         const dst = entityById[r.target];
                         const a = pos(src);
                         const b = pos(dst);
-                        const active = focusId && (r.source === focusId || r.target === focusId);
+                        const linkClass = linkState(r);
+                        const active = linkClass === 'active';
                         // Facts are directed (subject -> object); an edge can hold facts both ways
                         const forward = isKg && r.examples.some((ex) => ex.from === r.source);
                         const backward = isKg && r.examples.some((ex) => ex.from === r.target);
@@ -253,20 +355,18 @@ function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
                         const ra = radius(src) + 3;
                         const rb = radius(dst) + 3;
                         const marker = `url(#cm-arrow${active ? '-active' : ''})`;
-                        const label = isKg && active ? r.examples[0]?.relation : null;
+                        const label = relationLabels[`${r.source}|${r.target}`];
                         return (
                           <g key={`${r.source}|${r.target}`}>
                             <line
                               x1={a.x + ux * ra} y1={a.y + uy * ra} x2={b.x - ux * rb} y2={b.y - uy * rb}
-                              className={`link ${active ? 'active' : ''} ${focusId && !active ? 'dim' : ''}`}
+                              className={`link ${linkClass}`}
                               strokeWidth={1 + (2 * r.weight) / maxWeight}
                               markerEnd={forward ? marker : undefined}
                               markerStart={backward ? marker : undefined}
                             />
                             {label && (
-                              <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 4} textAnchor="middle" className="link-label">
-                                {label.length > 28 ? `${label.slice(0, 27)}…` : label}
-                              </text>
+                              <text x={label.x} y={label.y} textAnchor="middle" className="link-label">{label.text}</text>
                             )}
                           </g>
                         );
@@ -275,13 +375,14 @@ function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
                     <g className="nodes">
                       {visibleEntities.map((e) => {
                         const p = pos(e);
-                        const dim = focusSet && !focusSet.has(e.id);
+                        const dim = emphasis && !emphasis.has(e.id);
+                        const inEvidence = evidenceSet?.has(e.id);
                         const showLabel = labelledIds.has(e.id);
                         const r = radius(e);
                         return (
                           <g
                             key={e.id}
-                            className={`node ${dim ? 'dim' : ''} ${selectedId === e.id ? 'selected' : ''}`}
+                            className={`node ${dim ? 'dim' : ''} ${selectedId === e.id ? 'selected' : ''} ${inEvidence ? 'in-evidence' : ''}`}
                             transform={`translate(${p.x},${p.y})`}
                             tabIndex={0}
                             role="button"
@@ -292,6 +393,7 @@ function CorpusMap({ apiBase, corpusId, files, scopeFileIds, onClose }) {
                             onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectEntity(e.id); } }}
                           >
                             <circle r={r + 8} className="hit" />
+                            {inEvidence && <circle r={r + 4} className="evidence-ring" />}
                             <circle r={r} fill={TYPE_COLORS[e.type]} className="dot" />
                             {showLabel && (() => {
                               // Keep labels inside the plot near its left/right edges

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import App from './App';
 
 const CORPUS = '00000000-0000-4000-8000-000000000001';
@@ -263,4 +263,55 @@ test('corpus map shows extracted facts with direction, evidence and extraction p
   const fact = screen.getByText('overtook', { selector: '.fact-relation' }).closest('p');
   expect(fact).toHaveTextContent('Hollywood overtook Europe');
   expect(screen.getByText(/Hollywood overtook Europe./, { selector: 'blockquote' })).toBeInTheDocument();
+});
+
+// Runs a search whose answer cites the given evidence chunks
+async function searchWithEvidence(evidence) {
+  global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
+  const done = JSON.stringify({ answer: 'Hollywood overtook Europe.', sources: [], confidence: 0.9, chunks: evidence });
+  const reads = [{ done: false, value: new Uint8Array(Buffer.from(`event:done\ndata:${done}\n\n`)) }];
+  global.fetch.mockImplementationOnce(() => Promise.resolve({
+    ok: true,
+    body: { getReader: () => ({ read: () => Promise.resolve(reads.shift() || { done: true }) }) },
+  }));
+  fireEvent.change(screen.getByPlaceholderText(/uploaded files/), { target: { value: 'Who overtook Europe?' } });
+  fireEvent.submit(screen.getByPlaceholderText(/uploaded files/).closest('form'));
+  await screen.findByText(`Evidence (${evidence.length} chunks)`);
+}
+
+test('hovering an evidence chunk highlights its entities in the corpus map; Show in map pins it', async () => {
+  Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it
+  const chunk = (chunkId, content) => ({ chunkId, content, source: 's3://rag/x.txt',
+    milvusScore: 0.9, pagerankScore: 0.1, hybridScore: 0.5 });
+  await openMyFiles();
+  await searchWithEvidence([chunk(`${CINEMA}:0`, 'Hollywood overtook Europe.'), chunk(`${TEA}:7`, 'Not mapped.')]);
+
+  // Map closed: "Show in map" opens it, scrolls to it and keeps the highlight
+  const [first, second] = screen.getAllByRole('listitem').filter((li) => li.classList.contains('evidence-item'));
+  fireEvent.click(within(first).getByRole('button', { name: 'Show in map' }));
+  const banner = await screen.findByText(/Evidence:/);
+  expect(banner.closest('p')).toHaveTextContent('Evidence: cinema.txt · chunk 1. 2 entities highlighted.');
+  expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  const ringed = () => [...document.querySelectorAll('.node.in-evidence')].map((n) => n.getAttribute('aria-label').split(',')[0]);
+  expect(ringed()).toEqual(['Hollywood', 'Europe']);
+  expect(document.querySelector('.node.dim').getAttribute('aria-label')).toMatch(/^special effects/);
+  expect(within(first).getByRole('button', { name: 'Stop highlighting in map' })).toHaveAttribute('aria-pressed', 'true');
+
+  // Hovering another chunk takes over while hovered; one outside the map says so
+  fireEvent.mouseEnter(second);
+  expect(screen.getByText(/isn't in this map/)).toBeInTheDocument();
+  expect(ringed()).toEqual([]);
+  fireEvent.mouseLeave(second);
+  expect(screen.getByText(/Evidence:/).closest('p')).toHaveTextContent('cinema.txt · chunk 1');
+
+  // Clear removes the pinned highlight
+  fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect(screen.queryByText(/Evidence:/)).not.toBeInTheDocument();
+  expect(ringed()).toEqual([]);
+
+  // Plain hover with the map open
+  fireEvent.mouseEnter(first);
+  expect(ringed()).toEqual(['Hollywood', 'Europe']);
+  fireEvent.mouseLeave(first);
+  expect(ringed()).toEqual([]);
 });

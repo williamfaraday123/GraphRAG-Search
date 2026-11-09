@@ -249,3 +249,20 @@
 .corpus-map-fact { font-size: 0.88rem; }
 .corpus-map-fact strong { font-weight: 600; }
 .fact-relation { color: var(--text-muted); font-style: italic; }
+
+/* Evidence chunk highlight (hovered or pinned from the Evidence section) */
+.corpus-map-evidence {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+.corpus-map-graph .node .evidence-ring { fill: none; stroke: var(--text); stroke-width: 2; }
