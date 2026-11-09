@@ -1,5 +1,6 @@
 import grpc
 from concurrent import futures
+import json
 import logging
 import os
 import traceback
@@ -13,6 +14,7 @@ from retriever import HybridRetriever
 from graph_engine import build_query_graph
 from corpus import normalize_corpus_id, normalize_file_id
 from corpus_indexer import CorpusIndexer
+from knowledge_graph import KnowledgeGraphBuilder
 
 # Aliases for readability
 SearchRequest = query_pb2.SearchRequest
@@ -47,8 +49,20 @@ class QueryProcessorServicer:
         )
         self.app_graph = build_query_graph(self.retriever)
         self.corpus_indexer = CorpusIndexer(self.retriever.embedding_service)
+        # Background LLM extraction of entities/facts from uploads; also resumes any
+        # files left unprocessed by a previous run
+        self.kg_builder = KnowledgeGraphBuilder(self.corpus_indexer.neo4j_driver)
 
     def StartProcessing(self, request, context) -> Iterator[SearchResponse]:
+        # Knowledge-graph extraction pauses between chunks while a search is running,
+        # so both don't compete for the same local model
+        self.kg_builder.search_started()
+        try:
+            yield from self._run_search(request, context)
+        finally:
+            self.kg_builder.search_finished()
+
+    def _run_search(self, request, context) -> Iterator[SearchResponse]:
         """
         gRPC Stream Handler
         1. Hybrid Retrieval
@@ -164,6 +178,7 @@ class QueryProcessorServicer:
             response.filename = result["filename"]
             response.chunk_count = result["chunk_count"]
             response.message = "File indexed and ready to search"
+            self.kg_builder.enqueue_file(normalize_corpus_id(request.corpus_id), result["file_id"])
         except ValueError as e:
             response.message = str(e)
         except Exception as e:
@@ -209,6 +224,21 @@ class QueryProcessorServicer:
         except Exception as e:
             logger.exception("Could not delete corpus file")
             response.message = f"Could not delete file: {e}"
+        return response
+
+    def GetCorpusMap(self, request, context):
+        response = query_pb2.CorpusMapResponse()
+        try:
+            corpus_map = self.corpus_indexer.corpus_map(
+                request.corpus_id, list(request.file_ids), kg_builder=self.kg_builder
+            )
+            response.success = True
+            response.map_json = json.dumps(corpus_map, ensure_ascii=False)
+        except (ValueError, FileNotFoundError) as e:
+            response.error = str(e)
+        except Exception as e:
+            logger.exception("Could not build corpus map")
+            response.error = f"Could not build corpus map: {e}"
         return response
 
     def _make_status(self, stage: str, msg: str):

@@ -1,7 +1,5 @@
 import boto3
 from botocore.config import Config
-from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
 from typing import Dict, Any, Optional
 from document_text import read_text_object
 

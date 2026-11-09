@@ -1,7 +1,7 @@
 from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
+from llm_client import chat_client
 from retriever import HybridRetriever
 from document_text import display_name
 import networkx as nx
@@ -106,11 +106,7 @@ def plan_query_node(state: AgentState):
     multiple distinct parts get decomposed into a few focused sub-queries so the
     first retrieval round covers more ground than a single embedding lookup would.
     """
-    llm = ChatOpenAI(
-        model=os.getenv("EDGE_MODEL", "qwen3:4b-instruct"),
-        base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
-        api_key=os.getenv("LLM_API_KEY", "ollama")
-    )
+    llm = chat_client("EDGE_MODEL")
 
     system_msg = SystemMessage(content="You are a Query Planning Agent for a hybrid vector + knowledge-graph search engine.")
     prompt = f"""
@@ -202,11 +198,7 @@ def critical_analysis_node(state: AgentState):
             "search_queries": []
         }
 
-    llm = ChatOpenAI(
-        model=os.getenv("EDGE_MODEL", "qwen3:4b-instruct"),
-        base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
-        api_key=os.getenv("LLM_API_KEY", "ollama")
-    )
+    llm = chat_client("EDGE_MODEL")
 
     context_items = []
     for i, c in enumerate(state["refined_context"]):
@@ -293,12 +285,8 @@ def synthesize_answer(state: AgentState):
     if not state["refined_context"]:
         return {"final_answer": "I couldn't find relevant information in the knowledge base to answer this query."}
 
-    llm = ChatOpenAI(
-        model=os.getenv("ANSWER_MODEL", "qwen3:4b-instruct"),
-        base_url=os.getenv("EDGE_MODEL_BASE_URL", "http://localhost:11434/v1"),
-        api_key=os.getenv("LLM_API_KEY", "ollama"),
-        temperature=0,  # deterministic answers; sampling made option picks vary run to run
-    )
+    # temperature 0: deterministic answers; sampling made option picks vary run to run
+    llm = chat_client("ANSWER_MODEL", temperature=0)
 
     context_text = _format_context_by_file(state["refined_context"])
 

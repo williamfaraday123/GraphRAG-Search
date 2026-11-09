@@ -15,6 +15,8 @@ service QueryProcessorService {
   rpc GetCorpusFile (CorpusFileRequest) returns (GetCorpusFileResponse);
   // Removes one uploaded file from object storage, the graph and the vector index
   rpc DeleteCorpusFile (CorpusFileRequest) returns (DeleteCorpusFileResponse);
+  // Entities, relationships and chunk clusters for an upload workspace (corpus map)
+  rpc GetCorpusMap (CorpusMapRequest) returns (CorpusMapResponse);
 }
 
 message SearchRequest {
@@ -120,4 +122,15 @@ message GetCorpusFileResponse {
 message DeleteCorpusFileResponse {
   bool success = 1;
   string message = 2;
+}
+
+message CorpusMapRequest {
+  string corpus_id = 1;
+  repeated string file_ids = 2; // map only these files; empty = every file in the workspace
+}
+
+message CorpusMapResponse {
+  bool success = 1;
+  string map_json = 2; // entities, relationships, clusters (shape documented in corpus_map.py)
+  string error = 3;
 }

@@ -172,6 +172,16 @@ public class GrpcQueryClient {
                 .deleteCorpusFile(corpusFileRequest(corpusId, fileId));
     }
 
+    /** Builds the corpus map; embedding every chunk on CPU can take a while for large workspaces. */
+    public QueryProto.CorpusMapResponse getCorpusMap(String corpusId, List<String> fileIds) {
+        return blockingStub
+                .withDeadlineAfter(120, TimeUnit.SECONDS)
+                .getCorpusMap(QueryProto.CorpusMapRequest.newBuilder()
+                        .setCorpusId(corpusId)
+                        .addAllFileIds(fileIds)
+                        .build());
+    }
+
     private static QueryProto.CorpusFileRequest corpusFileRequest(String corpusId, String fileId) {
         return QueryProto.CorpusFileRequest.newBuilder()
                 .setCorpusId(corpusId)

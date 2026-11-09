@@ -17,6 +17,8 @@ from pymilvus import (
 )
 from neo4j import GraphDatabase
 
+from corpus_map import build_corpus_map
+from knowledge_graph import delete_file_entities, load_graph
 from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, normalize_file_id
 from document_text import (
     STORED_CONTENT_TYPE,
@@ -33,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_CHUNKS_PER_FILE = 500
+MAX_MAP_CHUNKS = 600  # keeps the corpus map responsive on CPU
 
 
 class CorpusIndexer:
@@ -179,6 +182,43 @@ class CorpusIndexer:
             self.s3.delete_object(Bucket=self.bucket_name, Key=transcript_key_for(object_key))
         return display_name(object_key.rsplit("/", 1)[-1])
 
+    def corpus_map(self, corpus_id: str, file_ids=None, kg_builder=None):
+        """Entities, relationships and chunk clusters for a workspace (or the given files).
+        Uses the stored LLM knowledge graph when it has facts; otherwise keyword statistics."""
+        corpus_id = normalize_corpus_id(corpus_id)
+        if corpus_id == "wiki":
+            raise ValueError("The corpus map is only available for uploaded files")
+        files = self.list_files(corpus_id)
+        if file_ids:
+            wanted = {normalize_file_id(f) for f in file_ids}
+            files = [f for f in files if f["file_id"] in wanted]
+        if not files:
+            raise ValueError("No uploaded files to map")
+        with self.neo4j_driver.session() as session:
+            records = session.run(
+                """
+                MATCH (c:Chunk {corpus_id: $corpus_id})
+                WHERE c.file_id IN $file_ids
+                RETURN c.chunk_id AS chunk_id, c.file_id AS file_id,
+                       c.chunk_index AS chunk_index, c.content AS content
+                """,
+                corpus_id=corpus_id,
+                file_ids=[f["file_id"] for f in files],
+            ).data()
+        order = {f["file_id"]: i for i, f in enumerate(files)}
+        chunks = sorted(
+            (r for r in records if r.get("content")),
+            key=lambda r: (order[r["file_id"]], r["chunk_index"] or 0),
+        )[:MAX_MAP_CHUNKS]
+        if not chunks:
+            raise ValueError("The selected files have no indexed text")
+        mapped_file_ids = [f["file_id"] for f in files]
+        kg = load_graph(self.neo4j_driver, corpus_id, mapped_file_ids)
+        progress = kg_builder.progress(corpus_id, mapped_file_ids) if kg_builder else None
+        return build_corpus_map(
+            chunks, self.embedding_service.generate_batch_embeddings, files, kg=kg, progress=progress
+        )
+
     def _locate_file(self, corpus_id: str, file_id: str):
         corpus_id = normalize_corpus_id(corpus_id)
         if corpus_id == "wiki":
@@ -198,6 +238,8 @@ class CorpusIndexer:
                 corpus_id=corpus_id,
                 file_id=file_id,
             ).consume()
+            # Knowledge graph: the file's facts, then entities no remaining chunk mentions
+            delete_file_entities(session, corpus_id, file_id)
 
     def _delete_vectors(self, corpus_id, file_id):
         self._connect_milvus()

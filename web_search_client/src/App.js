@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './App.css';
+import CorpusMap from './CorpusMap';
 
 // Empty string = relative URL, resolves against whatever host served this page.
 // Only needed as an absolute URL for `npm start` dev server (set REACT_APP_API_URL
@@ -25,6 +26,7 @@ function App() {
   const [deletingFiles, setDeletingFiles] = useState(false);
   const [fileActionError, setFileActionError] = useState(null);
   const selectAllRef = useRef(null);
+  const [showMap, setShowMap] = useState(false);
   const [status, setStatus] = useState(null);
   const [agentSteps, setAgentSteps] = useState([]);
   const [streamedText, setStreamedText] = useState('');
@@ -452,6 +454,15 @@ function App() {
                   <button
                     type="button"
                     className="file-action"
+                    onClick={() => setShowMap(true)}
+                    disabled={showMap}
+                    title="Explore entities, relationships and themes in the selected files (or all files)"
+                  >
+                    Map{selectedCount ? ` (${selectedCount})` : ''}
+                  </button>
+                  <button
+                    type="button"
+                    className="file-action"
                     onClick={previewSelected}
                     disabled={!selectedCount}
                   >
@@ -510,6 +521,15 @@ function App() {
                     );
                   })}
                 </div>
+              )}
+              {showMap && (
+                <CorpusMap
+                  apiBase={API_BASE}
+                  corpusId={corpusId}
+                  files={uploadedFiles}
+                  scopeFileIds={uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)}
+                  onClose={() => setShowMap(false)}
+                />
               )}
             </div>
           )}

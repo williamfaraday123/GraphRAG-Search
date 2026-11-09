@@ -167,8 +167,8 @@ body {
 
 .uploaded-files { margin-top: 16px; }
 .uploaded-files h3, .files-heading { color: var(--text-muted); font-size: 0.8rem; font-weight: 700; }
-.uploaded-files ul { list-style: none; }
-.uploaded-files li {
+.uploaded-files > ul { list-style: none; }
+.uploaded-files > ul > li {
   display: flex;
   justify-content: space-between;
   align-items: center;

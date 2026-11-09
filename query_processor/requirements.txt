@@ -27,3 +27,5 @@ faster-whisper
 av<16
 # Windows: CTranslate2 4.6+ and onnxruntime need the Visual C++ 2015-2022 runtime >= 14.40;
 # older runtimes crash with an access violation when the Whisper model loads.
+# Corpus map entity-graph layout (networkx kamada_kawai_layout)
+scipy

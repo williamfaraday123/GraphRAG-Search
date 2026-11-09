@@ -4,6 +4,7 @@ import com.example.orchestration_layer.grpc.GrpcQueryClient;
 import com.example.orchestration_layer.grpc.QueryProto;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -108,6 +109,34 @@ public class CorpusController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, response.getMessage());
         }
         return Map.of("success", true, "message", response.getMessage());
+    }
+
+    /**
+     * Corpus map (entities, relationships, chunk clusters) for the workspace.
+     * Optional fileIds=a,b limits it to those files. Returns the query processor's JSON as-is.
+     */
+    @GetMapping(value = "/{corpusId}/map", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> getCorpusMap(@PathVariable String corpusId,
+                                          @RequestParam(value = "fileIds", required = false) List<String> fileIds) {
+        List<String> validFileIds = new ArrayList<>();
+        String validCorpusId;
+        try {
+            validCorpusId = validateCorpusId(corpusId);
+            if (fileIds != null) {
+                for (String id : fileIds) {
+                    if (!id.isBlank()) validFileIds.add(validateUuid(id.trim(), "file ID"));
+                }
+            }
+        } catch (ResponseStatusException ex) {
+            // Explicit body so the UI can show the reason regardless of error-page settings
+            return ResponseEntity.badRequest().body(Map.of("message", String.valueOf(ex.getReason())));
+        }
+        var response = grpcClient.getCorpusMap(validCorpusId, validFileIds);
+        if (!response.getSuccess()) {
+            return ResponseEntity.badRequest().body(Map.of("message",
+                    response.getError().isEmpty() ? "Could not build corpus map" : response.getError()));
+        }
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(response.getMapJson());
     }
 
     private String validateCorpusId(String corpusId) {
