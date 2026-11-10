@@ -19,7 +19,7 @@ import java.util.Map;
  * Flow (matches diagrams/sequence.plantuml):
  *   HTTP POST /api/v1/search {prompt: "..."}
  *     → gRPC StartProcessing(prompt)
- *       → SSE: STATUS events (RETRIEVING → ITERATING → SYNTHESIZING)
+ *       → SSE: STATUS events (PLANNING → RETRIEVING → ANALYZING → SYNTHESIZING)
  *       → SSE: CHUNK events (streaming tokens)
  *       → SSE: DONE  event  (final answer + sources + confidence)
  */

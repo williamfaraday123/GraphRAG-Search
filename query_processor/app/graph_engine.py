@@ -32,6 +32,7 @@ class AgentState(TypedDict):
     graph_scores: Dict[str, float]   # Stores PageRank scores for debugging/logging
     kg_paths: List[dict]          # Knowledge-graph fact paths found across rounds (best first)
     kg_seeds: List[str]           # Entities named in the queries that the walk started from
+    question_entities: List[str]  # Entity keys the question (first-round queries) names; coverage check
     file_similarity: dict         # "Which files are most similar?": file_similarity.py result, else None
 
 # --- Helper: Graph Analysis ---
@@ -79,6 +80,8 @@ def _merge_chunks(existing: List[dict], new: List[dict]) -> List[dict]:
                  'score': max(old.get('score', 0.0), c.get('score', 0.0)),
                  'kg_score': max(old.get('kg_score', 0.0), c.get('kg_score', 0.0)),
                  'found_by_graph': old.get('found_by_graph', False) and c.get('found_by_graph', False)}
+            if 'ppr_score' in old or 'ppr_score' in c:
+                c['ppr_score'] = max(old.get('ppr_score', 0.0), c.get('ppr_score', 0.0))
         merged[cid] = c
     return list(merged.values())
 
@@ -190,7 +193,12 @@ def make_retrieve_context_node(retriever: HybridRetriever):
         new_chunks = []
         new_relations = []
         new_paths = []
+        ppr_visited = []
         seeds = list(state.get("kg_seeds") or [])
+        # The question's own entities come from the first round (the question or the planner's
+        # sub-queries); follow-up searches name extra entities that aren't required
+        first_round = not state.get("iteration_count")
+        question_entities = list(state.get("question_entities") or [])
         for q in queries:
             result = retriever.search(
                 query=q,
@@ -202,6 +210,10 @@ def make_retrieve_context_node(retriever: HybridRetriever):
             new_relations.extend(result.get("relations", []))
             new_paths.extend(result.get("kg_paths", []))
             seeds += [s for s in result.get("kg_seeds", []) if s not in seeds]
+            if result.get("ppr_nodes") is not None:
+                ppr_visited.append(result["ppr_nodes"])
+            if first_round:
+                question_entities += [k for k in result.get("named_keys", []) if k not in question_entities]
 
         all_chunks = _merge_chunks(state.get("all_chunks", []), new_chunks)
         all_relations = _merge_relations(state.get("all_relations", []), new_relations)
@@ -218,14 +230,20 @@ def make_retrieve_context_node(retriever: HybridRetriever):
                 + (f", adding {graph_only} chunk(s) vector search missed." if graph_only else ".")
             )
 
-        pr_scores = calculate_authority_scores(all_chunks, all_relations)
+        corpus_id = state.get("corpus_id") or "wiki"
+        if corpus_id != "wiki" and all_chunks and all("ppr_score" in c for c in all_chunks):
+            # Upload workspaces: local Personalized PageRank over the whole workspace graph
+            pr_scores = {c["id"]: c["ppr_score"] for c in all_chunks if c.get("id")}
+            if ppr_visited:
+                kg_note += f" Personalized PageRank reached {max(ppr_visited)} graph node(s)."
+        else:
+            pr_scores = calculate_authority_scores(all_chunks, all_relations)
         ranked_chunks = _rank_chunks(all_chunks, pr_scores)
         top_context = ranked_chunks[:20]
 
         # File-similarity questions: compare the files' knowledge graphs once (first round)
         similarity = state.get("file_similarity")
         similarity_note = ""
-        corpus_id = state.get("corpus_id") or "wiki"
         if similarity is None and corpus_id != "wiki" and is_file_comparison(state["query"]):
             try:
                 similarity = retriever.file_similarity.compare(corpus_id, state.get("file_ids") or None)
@@ -243,6 +261,7 @@ def make_retrieve_context_node(retriever: HybridRetriever):
             "graph_scores": pr_scores,
             "kg_paths": kg_paths,
             "kg_seeds": seeds,
+            "question_entities": question_entities,
             "search_queries": [],  # consumed — cleared until the critic sets new ones
             "messages": [
                 f"Retrieved {len(new_chunks)} new chunk(s) across {len(queries)} "
@@ -253,15 +272,68 @@ def make_retrieve_context_node(retriever: HybridRetriever):
         }
     return retrieve_context
 
-def critical_analysis_node(state: AgentState):
-    """Step 2: LLM analyzes gaps in the current context and, if insufficient,
-    proposes a refined follow-up query for another retrieval round."""
+def graph_coverage_analysis(state: AgentState, coverage):
+    """Coverage check for upload workspaces whose question names entities in the knowledge
+    graph (coverage.py): no model call. Returns None when it can't decide, so the model does."""
+    corpus_id = state.get("corpus_id") or "wiki"
+    keys = state.get("question_entities") or []
+    if corpus_id == "wiki" or not keys or coverage is None:
+        return None
+    file_ids = state.get("file_ids") or None
+    try:
+        context_ids = [c["id"] for c in state["refined_context"] if c.get("id")]
+        missing = coverage.uncovered(corpus_id, file_ids, keys, context_ids)
+        if not missing:
+            return {
+                "messages": [f"Analysis: Converged at iteration {state['iteration_count']} — the context covers "
+                             f"every entity the question names that the searched files mention "
+                             f"({len(keys)} named; graph coverage check)"],
+                "search_queries": [],
+            }
+        if state["iteration_count"] >= MAX_ITERATIONS:
+            return {"messages": [f"Analysis: {', '.join(e['name'] for e in missing)} still not in the context; "
+                                 "search limit reached"],
+                    "search_queries": []}
+        queries = [coverage.follow_up_query(corpus_id, file_ids, e) for e in missing[:MAX_SUB_QUERIES]]
+    except Exception:
+        logger.exception("Graph coverage check failed; asking the model instead")
+        return None
+    return {
+        "messages": [f"Analysis: Gap identified - the context has nothing on "
+                     f"{', '.join(e['name'] for e in missing)} (graph coverage check). "
+                     f"REFINED_QUERY: {' | '.join(queries)}"],
+        "iteration_count": state["iteration_count"] + 1,
+        "search_queries": queries,
+    }
+
+
+def make_critical_analysis_node(retriever: HybridRetriever = None):
+    coverage = getattr(retriever, "coverage", None)
+
+    def analysis(state: AgentState):
+        return critical_analysis_node(state, coverage)
+    return analysis
+
+
+def critical_analysis_node(state: AgentState, coverage=None):
+    """Step 2: decides whether the context is enough or another retrieval round is needed.
+    Upload workspaces whose question names known entities use the graph coverage check;
+    otherwise the model analyzes gaps and proposes a refined follow-up query."""
 
     if not state["refined_context"]:
         return {
             "messages": ["Analysis: No context retrieved — nothing to refine further."],
             "search_queries": []
         }
+
+    if state.get("file_similarity"):
+        # Answered from the files' knowledge-graph comparison; more chunks wouldn't change it
+        return {"messages": ["Analysis: Converged — file comparison uses the knowledge graph"],
+                "search_queries": []}
+
+    decided = graph_coverage_analysis(state, coverage)
+    if decided is not None:
+        return decided
 
     llm = chat_client("EDGE_MODEL")
 
@@ -780,7 +852,7 @@ def build_query_graph(retriever: HybridRetriever):
 
     workflow.add_node("planner", plan_query_node)
     workflow.add_node("retriever", make_retrieve_context_node(retriever))
-    workflow.add_node("analyst", critical_analysis_node)
+    workflow.add_node("analyst", make_critical_analysis_node(retriever))
     workflow.add_node("synthesizer", synthesize_answer)
 
     workflow.set_entry_point("planner")

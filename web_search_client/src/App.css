@@ -305,7 +305,9 @@ body {
   animation: fadeIn 0.3s ease;
 }
 
+.status-bar.stage-planning    { background: rgba(116, 185, 255, 0.12); color: #a5d0ff; }
 .status-bar.stage-retrieving  { background: rgba(108, 92, 231, 0.12); color: #b4a7f6; }
+.status-bar.stage-analyzing   { background: rgba(255, 159, 67, 0.12);  color: #ffbe76; }
 .status-bar.stage-iterating   { background: rgba(255, 159, 67, 0.12);  color: #ffbe76; }
 .status-bar.stage-synthesizing { background: rgba(0, 214, 143, 0.12);  color: #55efc4; }
 

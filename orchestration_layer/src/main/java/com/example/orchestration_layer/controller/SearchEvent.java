@@ -13,7 +13,7 @@ public class SearchEvent {
     }
 
     private EventType type;
-    private String stage;        // for STATUS: RETRIEVING, ITERATING, SYNTHESIZING
+    private String stage;        // for STATUS: PLANNING, RETRIEVING, ANALYZING, SYNTHESIZING (the step starting now)
     private String message;       // for STATUS / ERROR
     private String content;       // for CHUNK (a word or token)
     private String sourceId;      // for CHUNK source metadata

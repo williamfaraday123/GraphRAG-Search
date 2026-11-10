@@ -455,6 +455,8 @@ function App() {
   };
 
   const stageIcons = {
+    PLANNING: '🧭',
+    ANALYZING: '🧐',
     RETRIEVING: '\uD83D\uDD0D',    //🔍
     ITERATING: '\uD83D\uDD04',     // 🔄
     SYNTHESIZING: '\u2728',        // ✨

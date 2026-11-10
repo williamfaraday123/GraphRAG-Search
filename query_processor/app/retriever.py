@@ -6,10 +6,20 @@ from embedding import EmbeddingService
 from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, WIKI_CORPUS_ID
 from graph_retrieval import GraphRetriever
 from file_similarity import FileSimilarity
+from local_ppr import LocalPPR, chunk_node, entity_node
+from coverage import CoverageCheck
 import logging
 import os
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
+
+# Local PPR start weights: entities the question names lead; vector hits (scaled by their
+# similarity) add a smaller share, and are the only start nodes before any facts exist
+NAMED_SEED_WEIGHT = 1.0
+CHUNK_SEED_WEIGHT = 0.2
+PPR_NEW_CHUNKS = 2       # chunks PPR may add that neither vector search nor fact paths found
 
 class HybridRetriever:
     def __init__(self, milvus_host: str, milvus_port: str, 
@@ -31,6 +41,10 @@ class HybridRetriever:
         self.graph_retriever = GraphRetriever(self.neo4j_service.driver, self.embedding_service)
         # "Which two files are most similar?": compares files' knowledge graphs (file_similarity.py)
         self.file_similarity = FileSimilarity(self.neo4j_service.driver, self.embedding_service)
+        # Authority ranking for upload workspaces (local push Personalized PageRank)
+        self.local_ppr = LocalPPR(self.neo4j_service.driver)
+        # "Is the context enough?" without a model call (graph_engine analyst)
+        self.coverage = CoverageCheck(self.neo4j_service.driver)
 
         logger.info("HybridRetriever initialized with Milvus, Neo4j, MinIO, and Local Embeddings")
 
@@ -103,14 +117,30 @@ class HybridRetriever:
                 logger.error(f"Knowledge-graph retrieval failed: {e}")
         for item in milvus_results:
             item["kg_score"] = kg["chunk_scores"].get(item.get("id"), 0.0)
+        vector_hits = list(milvus_results)
         milvus_results.extend(kg["chunks"])
         candidate_ids += [c["id"] for c in kg["chunks"]]
+
+        # --- STEP 3b: Local Personalized PageRank (upload workspaces) ---
+        # Authority = how strongly each chunk connects to the question's entities and the
+        # vector hits across the whole workspace graph; replaces PageRank on the induced subgraph
+        ppr_nodes = None
+        if corpus_id != WIKI_CORPUS_ID:
+            try:
+                ppr_nodes = self._apply_local_ppr(
+                    query_vector, corpus_id, file_ids, vector_hits, kg.get("named_keys", []),
+                    milvus_results, max_new_chunks=PPR_NEW_CHUNKS,
+                )
+                candidate_ids = [c["id"] for c in milvus_results]
+            except Exception as e:
+                logger.error(f"Local PPR failed, falling back to subgraph PageRank: {e}")
 
         logger.info(f"Extracted {len(candidate_ids)} unique IDs for sub-graph construction")
 
         # Instead of keyword search, query Neo4j to find connections based on IDs from those chunks from milvus search
+        # (only needed for subgraph PageRank: the wiki corpus, or uploads when local PPR failed)
         adjacency_matrix = []
-        if candidate_ids:
+        if candidate_ids and ppr_nodes is None:
             try:
                 adjacency_matrix = self.neo4j_service.get_subgraph_adjacency(
                     candidate_ids,
@@ -150,4 +180,41 @@ class HybridRetriever:
             "edge_count": len(adjacency_matrix),
             "kg_paths": kg["paths"],
             "kg_seeds": kg["seeds"],
+            "ppr_nodes": ppr_nodes,
+            "named_keys": kg.get("named_keys", []),  # entities the query names (coverage check)
         }
+
+    def _apply_local_ppr(self, query_vector, corpus_id, file_ids, vector_hits, named_keys,
+                         chunks, max_new_chunks):
+        """Sets each chunk's 'ppr_score' and appends up to max_new_chunks chunks the graph
+        connects to at least as strongly as to a vector hit. Returns the nodes visited."""
+        seeds = {entity_node(k): NAMED_SEED_WEIGHT for k in named_keys}
+        for hit in vector_hits:
+            if hit.get("id"):
+                seeds[chunk_node(hit["id"])] = max(seeds.get(chunk_node(hit["id"]), 0.0),
+                                                   CHUNK_SEED_WEIGHT * max(hit.get("score", 0.0), 0.01))
+        scores, visited = self.local_ppr.scores(seeds, corpus_id, file_ids or None)
+
+        known = {c.get("id") for c in chunks}
+        hit_scores = [scores.get(h["id"], 0.0) for h in vector_hits if h.get("id")]
+        floor = min(hit_scores) if hit_scores else 0.0
+        new_ids = [cid for cid, s in sorted(scores.items(), key=lambda kv: -kv[1])
+                   if cid not in known and s >= floor and s > 0][:max_new_chunks]
+        if new_ids:
+            rows = [r for r in self.graph_retriever._load_chunks(new_ids) if r.get("content")]
+            if rows:
+                vectors = self.embedding_service.generate_batch_embeddings([r["content"] for r in rows])
+                q = np.asarray(query_vector, dtype=np.float32)
+                q /= np.linalg.norm(q) + 1e-9
+                for row, vec in zip(rows, vectors):
+                    v = np.asarray(vec, dtype=np.float32)
+                    chunks.append({
+                        "id": row["id"], "content": row["content"], "source": row["source"],
+                        "score": float(v @ q / (np.linalg.norm(v) + 1e-9)),  # cosine, like Milvus
+                        "kg_score": 0.0, "found_by_graph": True,
+                    })
+        for c in chunks:
+            c["ppr_score"] = scores.get(c.get("id"), 0.0)
+        logger.info("Local PPR: %d seed(s) (%d entities), %d graph node(s) visited, %d chunk(s) added",
+                    len(seeds), len(named_keys), visited, len(new_ids))
+        return visited

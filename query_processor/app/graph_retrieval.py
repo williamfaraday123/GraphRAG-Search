@@ -188,6 +188,7 @@ class GraphRetriever:
         )
         return {
             "seeds": [labels[k] for k in seeds if k in named],
+            "named_keys": sorted(named),  # start nodes for local PPR (local_ppr.py)
             "paths": [
                 {"score": p["score"], "facts": [_public(f) for f in p["facts"]]}
                 for p in chosen

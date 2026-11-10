@@ -67,8 +67,8 @@ raw_data/ -> MinIO -> DocumentChunker -> EdgeGenerator -> Neo4j
    - retrieves similar chunks from Milvus;
    - uses those chunk IDs to fetch their local subgraph from Neo4j; and
    - can retrieve the original document from MinIO for source access.
-5. The LangGraph workflow calculates PageRank over the retrieved subgraph and re-ranks chunks with `0.6 × semantic score + 0.4 × PageRank score`.
-6. The analyst can request another retrieval round when it finds a gap; the workflow allows at most two refinement iterations.
+5. The LangGraph workflow re-ranks chunks by semantic score plus an authority score. For upload workspaces, authority is local push Personalized PageRank (`local_ppr.py`) over the whole workspace graph (chunks, entities, `NEXT_CHUNK`, `MENTIONS` and `FACT` edges), started from the entities the question names and the vector hits; neighbours are fetched from Neo4j as the push reaches them, so the cost does not grow with workspace size. For the wiki corpus, it is PageRank over the retrieved subgraph. Weights: `0.6 × semantic + 0.4 × authority`, or `0.5 × semantic + 0.2 × authority + 0.3 × fact-path relevance` when knowledge-graph paths were found.
+6. The analyst can request another retrieval round when it finds a gap; the workflow allows at most two refinement iterations. In upload workspaces where the question names entities in the knowledge graph, the analyst uses a graph coverage check (`coverage.py`) instead of a model call: the context is enough when a chunk in it mentions every named entity that the searched files mention; otherwise the next round searches each missing entity's strongest fact. Other questions (wiki, or no named entities) still use the model; file-comparison questions skip the check.
 7. The synthesizer LLM produces the final answer from the highest-ranked evidence chunks.
 8. The query processor streams statuses, agent steps, answer words, and final evidence over gRPC. Spring Boot relays them as SSE events to the browser.
 
@@ -138,6 +138,8 @@ Within Docker Compose, services communicate over the `ai-net` network using serv
 | `query_processor/app/main.py` | gRPC server and streamed responses |
 | `query_processor/app/retriever.py` | Milvus, Neo4j, and object-storage retrieval |
 | `query_processor/app/graph_engine.py` | LangGraph workflow, PageRank, and LLM stages |
+| `query_processor/app/local_ppr.py` | Local push Personalized PageRank over an upload workspace's graph |
+| `query_processor/app/coverage.py` | Graph coverage check that decides whether another retrieval round is needed |
 | `orchestration_layer/.../SearchController.java` | HTTP/SSE endpoints |
 | `orchestration_layer/.../GrpcQueryClient.java` | gRPC-to-SSE bridge |
 | `web_search_client/src/App.js` | Browser UI and SSE consumption |

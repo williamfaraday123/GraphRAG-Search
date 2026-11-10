@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 import traceback
 from typing import Iterator
 
@@ -12,7 +13,7 @@ import query_pb2
 import query_pb2_grpc
 
 from retriever import HybridRetriever
-from graph_engine import answer_paths, build_query_graph, similarity_paths
+from graph_engine import MAX_ITERATIONS, answer_paths, build_query_graph, similarity_paths
 from corpus import normalize_corpus_id, normalize_file_id
 from corpus_indexer import CorpusIndexer
 from knowledge_graph import KnowledgeGraphBuilder
@@ -76,7 +77,7 @@ class QueryProcessorServicer:
             file_ids = [normalize_file_id(f) for f in request.file_ids]
             logger.info(f"Processing query: {prompt} (files: {file_ids or 'all'})")
 
-            yield self._make_status("RETRIEVING", "Fetching vectors and graph relations...")
+            yield self._make_status("PLANNING", "Deciding how to search for this question...")
 
             initial_state = {
                 "query": prompt,
@@ -93,6 +94,7 @@ class QueryProcessorServicer:
                 "graph_scores": {},
                 "kg_paths": [],
                 "kg_seeds": [],
+                "question_entities": [],
                 "file_similarity": None,
             }
 
@@ -100,23 +102,35 @@ class QueryProcessorServicer:
             # agent's step (planner/retriever/analyst/synthesizer) can be surfaced
             # to the UI as it happens, not just the three coarse pipeline stages.
             state_acc = dict(initial_state)
-            iterating_announced = False
+            # A node's update only arrives once it has finished, so each status names the step
+            # that starts next; each agent step reports how long its step took
+            timings = []
+            step_started = time.perf_counter()
 
             for step in self.app_graph.stream(initial_state, stream_mode="updates"):
                 for node_name, update in step.items():
                     state_acc.update(update)
+                    elapsed = time.perf_counter() - step_started
+                    timings.append(f"{node_name} {elapsed:.1f}s")
 
                     detail = update["messages"][-1] if update.get("messages") else ""
-                    yield self._make_agent_step(node_name, detail)
+                    if node_name == "synthesizer":
+                        detail = detail or "Answer written"
+                    yield self._make_agent_step(node_name, f"{detail} ({elapsed:.1f} s)")
 
-                    if node_name == "retriever" and not iterating_announced:
-                        yield self._make_status("ITERATING", "Running Pregel consensus engine...")
-                        iterating_announced = True
-                    elif node_name == "analyst" and update.get("search_queries"):
-                        yield self._make_status("RETRIEVING", "Gap identified — running another retrieval round...")
-                    elif node_name == "synthesizer":
-                        yield self._make_status("SYNTHESIZING", "Generating final answer...")
+                    if node_name == "planner":
+                        yield self._make_status("RETRIEVING", "Searching vectors and the knowledge graph...")
+                    elif node_name == "retriever":
+                        yield self._make_status("ANALYZING", "Checking whether the context answers the question...")
+                    elif node_name == "analyst":
+                        if state_acc["iteration_count"] < MAX_ITERATIONS and state_acc.get("search_queries"):
+                            yield self._make_status("RETRIEVING", "Gap identified — running another retrieval round...")
+                        else:
+                            yield self._make_status(
+                                "SYNTHESIZING", f"Writing the answer with {os.getenv('ANSWER_MODEL', 'the answer model')}...")
+                    step_started = time.perf_counter()
 
+            logger.info("Search step timings: %s", ", ".join(timings))
             answer = state_acc.get("final_answer", "")
 
             # Stream the answer (simulated streaming of the final text). Each piece is a word
