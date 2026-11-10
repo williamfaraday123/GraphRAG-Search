@@ -77,6 +77,7 @@ async function openMyFiles() {
 beforeEach(() => {
   window.localStorage.setItem('graphrag-corpus-id', CORPUS);
   mockApi();
+  Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it; Map/Preview scroll to what they open
 });
 
 test('switches between wiki and uploaded-file search modes', async () => {
@@ -228,9 +229,27 @@ test('corpus map shows entities, relationships and clusters for the selected fil
   fireEvent.click(screen.getAllByRole('button', { name: 'Show 2 chunks' })[0]);
   expect(screen.getByText('Effects drew crowds.')).toBeInTheDocument();
 
-  // Selection changed after building: prompt to rebuild
+  // No Rebuild button: a changed selection points to the Map button instead
+  expect(screen.queryByRole('button', { name: /Rebuild/ })).not.toBeInTheDocument();
   fireEvent.click(screen.getByLabelText('Select cinema.txt'));
-  expect(screen.getByText(/File selection changed/)).toBeInTheDocument();
+  expect(screen.getByText(/File selection changed. Click Map to map the 2 selected files/)).toBeInTheDocument();
+
+  // Clicking Map again builds the map for the new selection, like Preview
+  fireEvent.click(screen.getByRole('button', { name: 'Map (2)' }));
+  const mapCalls = global.fetch.mock.calls.filter(([url]) => url.includes('/map'));
+  expect(mapCalls).toHaveLength(2);
+  expect(mapCalls[1][0]).toContain(`/map?fileIds=${CINEMA},${TEA}`);
+  await waitFor(() => expect(screen.queryByText(/File selection changed/)).not.toBeInTheDocument());
+});
+
+test('clicking Map with the same selection fetches the map again (picks up new facts)', async () => {
+  await openMyFiles();
+  fireEvent.click(screen.getByRole('button', { name: 'Map' }));
+  await screen.findByText(/3 entities/);
+  fireEvent.click(screen.getByRole('button', { name: 'Map' }));
+  expect(screen.getByText('Updating the map…')).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText('Updating the map…')).not.toBeInTheDocument());
+  expect(global.fetch.mock.calls.filter(([url]) => url.includes('/map'))).toHaveLength(2);
 });
 
 test('corpus map shows the server error', async () => {
@@ -255,7 +274,7 @@ test('corpus map shows extracted facts with direction, evidence and extraction p
   global.fetch.mockImplementationOnce(() => json(kgMap));
   fireEvent.click(screen.getByRole('button', { name: 'Map' }));
 
-  expect(await screen.findByRole('status')).toHaveTextContent('2 of 3 chunks read');
+  expect(await screen.findByText(/Extracting facts with the local model/)).toHaveTextContent('2 of 3 chunks read');
   expect(screen.getByText(/Fact stated in your files/)).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('button', { name: /^Europe 1$/ }));
@@ -365,4 +384,110 @@ test('shows the knowledge-graph reasoning path, marks graph-found evidence, and 
   fireEvent.mouseLeave(paths[0]);
   fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
   expect(ringed()).toEqual([]);
+});
+
+test('shows the facts two files share for a file-similarity answer', async () => {
+  Element.prototype.scrollIntoView = jest.fn();
+  const fact = (source, sourceLabel, relation, target, targetLabel, chunkId, filename) =>
+    ({ source, sourceLabel, relation, target, targetLabel, chunkId, fileId: chunkId.split(':')[0], filename, evidence: 'x' });
+  const graphPaths = [{ score: 0.75, kind: 'shared', facts: [
+    fact('hollywood', 'Hollywood', 'overtook', 'europe', 'Europe', `${CINEMA}:0`, 'cinema.txt'),
+    fact('hollywood', 'Hollywood', 'surpassed', 'europe', 'Europe', `${TEA}:0`, 'tea.txt'),
+  ] }];
+  await openMyFiles();
+  await searchWithEvidence([
+    { chunkId: `${CINEMA}:0`, content: 'Hollywood overtook Europe.', source: `s3://rag/uploads/${CORPUS}/${CINEMA}/cinema.txt`,
+      milvusScore: 1, pagerankScore: 0, graphScore: 0, foundByGraph: false, hybridScore: 0.6 },
+  ], { graphPaths, graphSeeds: [] });
+
+  expect(screen.getByRole('heading', { name: 'Shared facts' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Reasoning path' })).not.toBeInTheDocument();
+  const [path] = document.querySelectorAll('.graph-path');
+  expect(path).toHaveTextContent('Hollywood overtook Europe · cinema.txtsame asHollywood surpassed Europe · tea.txt');
+
+  fireEvent.click(within(path).getByRole('button', { name: 'Show in map' }));
+  const banner = await screen.findByText(/Shared facts:/);
+  expect(banner.closest('p')).toHaveTextContent('Shared facts: 2 facts linking Hollywood, Europe.');
+  expect(screen.getByRole('button', { name: 'Back to shared facts' })).toBeInTheDocument();
+});
+
+test('shows the answer as formatted Markdown, answer first, with the checks collapsed', async () => {
+  await openMyFiles();
+  const answer = [
+    '### Checked evidence',
+    '- **plenty of capital**: SUPPORTED. "Hollywood had the money." [cinema.txt]',
+    '- **serious issues**: NOT SUPPORTED. "Swedish films were serious." [cinema.txt]',
+    '',
+    '### Answer',
+    'The reasons are **plenty of capital** and **well-written narratives** [cinema.txt].',
+  ].join('\n');
+  await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: 's3://rag/x.txt',
+    milvusScore: 1, pagerankScore: 1, hybridScore: 1 }], { answer });
+
+  const section = document.querySelector('.answer-section');
+  const text = section.querySelector('.answer-text');
+  expect(text).toHaveTextContent('The reasons are plenty of capital and well-written narratives cinema.txt');
+  expect([...text.querySelectorAll('strong')].map((s) => s.textContent)).toEqual(['plenty of capital', 'well-written narratives']);
+  expect(section.textContent).not.toContain('**');
+  const checks = section.querySelector('details.answer-checks');
+  expect(checks.open).toBe(false);
+  expect(within(checks).getByText('How the answer was checked')).toBeInTheDocument();
+  expect(checks.querySelectorAll('li')).toHaveLength(2);
+});
+
+test('Map and Preview scroll to what they open; Map scrolls back to an open map', async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = jest.fn(function scroll() { scrolled.push(this); });
+  await openMyFiles();
+
+  fireEvent.click(screen.getByLabelText('Select cinema.txt'));
+  fireEvent.click(screen.getByRole('button', { name: 'Preview (1)' }));
+  expect(scrolled.at(-1)).toHaveClass('file-preview');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Map (1)' }));
+  expect(scrolled.at(-1).querySelector('.corpus-map')).not.toBeNull();
+  await screen.findByText(/3 entities/);
+
+  // Already open: the button stays enabled, scrolls back to the map and updates it
+  scrolled.length = 0;
+  const mapButton = screen.getByRole('button', { name: 'Map (1)' });
+  expect(mapButton).toBeEnabled();
+  fireEvent.click(mapButton);
+  expect(scrolled.at(-1).querySelector('.corpus-map')).not.toBeNull();
+  await waitFor(() => expect(screen.queryByText('Updating the map…')).not.toBeInTheDocument());
+});
+
+test('Sources are links that open the full text in a new tab', async () => {
+  await openMyFiles();
+  const uri = `s3://rag-datasets/uploads/${CORPUS}/${CINEMA}/cinema.pdf.txt`;
+  await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: uri,
+    milvusScore: 1, pagerankScore: 1, hybridScore: 1 }], { sources: [uri] });
+
+  const link = screen.getByRole('link', { name: /cinema\.pdf.*opens in a new tab/ });
+  expect(link).toHaveAttribute('href', `/?source=${encodeURIComponent(uri)}`);
+  expect(link).toHaveAttribute('target', '_blank');
+  expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  expect(link).toHaveTextContent(`cinema.pdfrag-datasets/uploads/${CORPUS}/${CINEMA}/cinema.pdf.txt`);
+});
+
+test('multiple choice: direct answer summary first, then every option with its verdict', async () => {
+  const replies = require('./__fixtures__/modelReplies.json');
+  await openMyFiles();
+  await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: 's3://rag/x.txt',
+    milvusScore: 1, pagerankScore: 1, hybridScore: 1 }], { answer: replies.bothFiles });
+
+  const section = document.querySelector('.answer-section');
+  const summary = section.querySelector('.answer-summary');
+  expect(summary.querySelector('strong')).toHaveTextContent('Answer: 4 (well-written narratives)');
+  expect(screen.getByRole('heading', { name: /Options evaluated/ })).toHaveTextContent('1 of 5 supported');
+  const items = [...section.querySelectorAll('.option-item')];
+  expect(items.map((li) => li.querySelector('.option-verdict').textContent))
+    .toEqual(['✗Not supported', '✗Not supported', '✗Not supported', '✓Supported', '✗Not supported']);
+  expect(items[3]).toHaveClass('is-supported');
+  expect(items[3].querySelector('.option-label')).toHaveTextContent('well-written narratives');
+  expect([...items[3].querySelectorAll('.option-evidence .md-cite')].map((c) => c.textContent)).toEqual(['sample.docx', 'sample2.pdf']);
+  // The summary comes before the breakdown, and no raw Markdown or collapsed checks remain
+  expect(summary.compareDocumentPosition(items[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(section.textContent).not.toContain('**');
+  expect(section.querySelector('details.answer-checks')).toBeNull();
 });

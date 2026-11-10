@@ -1,12 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './App.css';
 import CorpusMap from './CorpusMap';
-
-// Empty string = relative URL, resolves against whatever host served this page.
-// Only needed as an absolute URL for `npm start` dev server (set REACT_APP_API_URL
-// in web_search_client/.env.development.local) since that runs on a different port than
-// the API. Don't use .env.local: `npm run build` reads it too and would bake the URL in.
-const API_BASE = process.env.REACT_APP_API_URL || '';
+import Markdown, { parseOptionChecks, renderInline, splitAnswer } from './Markdown';
+import { API_BASE } from './config';
+import { formatSourceLabel, sourcePageHref, sourcePath } from './sourceLabel';
 
 function App() {
   const [query, setQuery] = useState('');
@@ -34,7 +31,10 @@ function App() {
   const [graphPaths, setGraphPaths] = useState([]);
   const [graphSeeds, setGraphSeeds] = useState([]);
   const [scrollToMap, setScrollToMap] = useState(0);
+  const [mapRequest, setMapRequest] = useState(null); // { id, fileIds }: one per Map click
   const mapRef = useRef(null);
+  const [scrollToPreview, setScrollToPreview] = useState(0);
+  const previewRef = useRef(null);
   const [status, setStatus] = useState(null);
   const [agentSteps, setAgentSteps] = useState([]);
   const [streamedText, setStreamedText] = useState('');
@@ -107,6 +107,26 @@ function App() {
     }
   }, [scrollToMap]);
 
+  // Same for the file preview opened by the Preview button
+  useEffect(() => {
+    if (scrollToPreview && previewRef.current) {
+      previewRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [scrollToPreview]);
+
+  // Like Preview: every Map click builds the map for the files checked right now
+  // (none checked = whole workspace), picking up facts extracted since the last build.
+  const requestMap = useCallback(() => {
+    const fileIds = uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId);
+    setMapRequest((prev) => ({ id: (prev?.id || 0) + 1, fileIds }));
+    setShowMap(true);
+  }, [uploadedFiles, selectedFileIds]);
+
+  const openMap = useCallback(() => {
+    requestMap();
+    setScrollToMap((n) => n + 1);
+  }, [requestMap]);
+
   const toggleShowInMap = useCallback((highlight) => {
     if (pinnedHighlight?.key === highlight.key) {
       setPinnedHighlight(null);
@@ -114,9 +134,9 @@ function App() {
     }
     setPinnedHighlight(highlight);
     setHoverHighlight(null);
-    setShowMap(true);
+    if (!showMap) requestMap(); // an open map keeps its current build
     setScrollToMap((n) => n + 1);
-  }, [pinnedHighlight]);
+  }, [pinnedHighlight, showMap, requestMap]);
 
   const backToEvidence = useCallback(() => {
     const item = pinnedHighlight && document.getElementById(pinnedHighlight.anchorId);
@@ -139,9 +159,11 @@ function App() {
     }
     : {});
   const chunkHighlight = (chunkId) => ({ key: `chunk:${chunkId}`, kind: 'chunk', chunkId, anchorId: `evidence-${chunkId}` });
+  // Shared facts (file-similarity answers) or a reasoning path; the map banner names which
+  const pathLabel = graphPaths.length && graphPaths.every((p) => p.kind === 'shared') ? 'Shared facts' : 'Reasoning path';
   const pathHighlight = (index) => (index === 'all'
-    ? { key: 'path:all', kind: 'path', facts: graphPaths.flatMap((p) => p.facts), anchorId: 'graph-reasoning' }
-    : { key: `path:${index}`, kind: 'path', facts: graphPaths[index].facts, anchorId: `graph-path-${index}` });
+    ? { key: 'path:all', kind: 'path', label: pathLabel, facts: graphPaths.flatMap((p) => p.facts), anchorId: 'graph-reasoning' }
+    : { key: `path:${index}`, kind: 'path', label: pathLabel, facts: graphPaths[index].facts, anchorId: `graph-path-${index}` });
 
   const chooseMode = useCallback(async (nextMode) => {
     setMode(nextMode);
@@ -229,6 +251,7 @@ function App() {
   const previewSelected = useCallback(() => {
     const ids = uploadedFiles.map((f) => f.fileId).filter((id) => selectedFileIds.has(id));
     setPreviewIds(ids);
+    setScrollToPreview((n) => n + 1);
     ids.filter((id) => !previewCache[id]).forEach((id) => {
       setPreviewCache((prev) => ({ ...prev, [id]: { loading: true, content: null, error: null } }));
       fetch(`${API_BASE}/api/v1/corpora/${encodeURIComponent(corpusId)}/files/${encodeURIComponent(id)}`)
@@ -372,6 +395,8 @@ function App() {
         if (resultRef.current) resultRef.current.scrollTop = resultRef.current.scrollHeight;
         break;
       case 'done':
+        // The full answer is authoritative (keeps every line break, even if a chunk was lost)
+        if (data.answer) setStreamedText(data.answer);
         setDone(true);
         setStatus(null);
         setIsLoading(false);
@@ -417,16 +442,6 @@ function App() {
       fetchChunkSource(chunk.source);
     }
   }, [sourceCache, fetchChunkSource]);
-
-  const formatSourceLabel = (source) => {
-    if (!source) return 'Unknown source';
-    const path = source.startsWith('s3://') ? source.slice('s3://'.length) : source;
-    // Uploads (bucket/uploads/<corpus>/<file>/<name>): show the file name. Text is stored as
-    // "<original>.txt" (report.pdf.txt), reversed like document_text.display_name.
-    const upload = path.match(/\/uploads\/[^/]+\/[^/]+\/([^/]+)$/);
-    if (!upload) return path;
-    return upload[1].replace(/(\.(?:txt|md|pdf|docx|mp3))\.txt$/i, '$1');
-  };
 
   const topAuthorityIndex = chunks.length > 0
     ? chunks.reduce((best, c, i, arr) => (c.pagerankScore > arr[best].pagerankScore ? i : best), 0)
@@ -518,9 +533,8 @@ function App() {
                   <button
                     type="button"
                     className="file-action"
-                    onClick={() => setShowMap(true)}
-                    disabled={showMap}
-                    title="Explore entities, relationships and themes in the selected files (or all files)"
+                    onClick={openMap}
+                    title="Map entities, relationships and themes in the selected files (or all files), with the latest extracted facts"
                   >
                     Map{selectedCount ? ` (${selectedCount})` : ''}
                   </button>
@@ -565,7 +579,7 @@ function App() {
               </p>
               {fileActionError && <p className="upload-error">{fileActionError}</p>}
               {previewIds.length > 0 && (
-                <div className="file-preview" aria-label="File preview">
+                <div className="file-preview" aria-label="File preview" ref={previewRef}>
                   <div className="file-preview-header">
                     <h3>Preview</h3>
                     <button type="button" className="file-action" onClick={() => setPreviewIds([])}>
@@ -586,13 +600,14 @@ function App() {
                   })}
                 </div>
               )}
-              {showMap && (
+              {showMap && mapRequest && (
                 <div ref={mapRef} className="corpus-map-anchor">
                   <CorpusMap
                     apiBase={API_BASE}
                     corpusId={corpusId}
                     files={uploadedFiles}
                     scopeFileIds={uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)}
+                    request={mapRequest}
                     onClose={closeMap}
                     hoverHighlight={hoverHighlight}
                     pinnedHighlight={pinnedHighlight}
@@ -655,7 +670,8 @@ function App() {
                 <li key={i} className="agent-trace-item">
                   <span className="agent-trace-icon">{meta.icon}</span>
                   <span className="agent-trace-name">{meta.label}</span>
-                  <span className="agent-trace-detail">{step.detail}</span>
+                  {/* The critic's detail is the model's own Markdown: show its bold, not its asterisks */}
+                  <span className="agent-trace-detail">{renderInline((step.detail || '').replace(/\s+/g, ' '), `trace-${i}`)}</span>
                 </li>
               );
             })}
@@ -673,10 +689,59 @@ function App() {
         <div className="results-panel" ref={resultRef}>
           <div className="answer-section">
             <h2 className="answer-label">Answer</h2>
-            <div className="answer-text">
-              {streamedText}
-              {isLoading && <span className="cursor-blink">▌</span>}
-            </div>
+            {(() => {
+              // The model writes "### Checked evidence" then "### Answer" (it reasons before it
+              // answers). Show the answer first. Multiple choice: a summary, then every option
+              // with its verdict. Otherwise: the checks one click away.
+              const { answer, checks } = splitAnswer(streamedText);
+              const options = done ? parseOptionChecks(checks) : null;
+              if (options) {
+                const supported = options.filter((o) => o.supported).length;
+                return (
+                  <>
+                    <div className="answer-text answer-summary">
+                      <Markdown text={answer} />
+                    </div>
+                    <section className="option-breakdown" aria-labelledby="option-breakdown-title">
+                      <h3 id="option-breakdown-title" className="option-breakdown-title">
+                        Options evaluated
+                        <span className="option-breakdown-count">{supported} of {options.length} supported</span>
+                      </h3>
+                      <ol className="option-list">
+                        {options.map((o) => (
+                          <li key={o.marker} className={`option-item ${o.supported ? 'is-supported' : 'is-rejected'}`}>
+                            <div className="option-head">
+                              <span className="option-marker">{o.marker}</span>
+                              <span className="option-label">{o.label}</span>
+                              <span className="option-verdict">
+                                <span aria-hidden="true">{o.supported ? '✓' : '✗'}</span>
+                                {o.supported ? 'Supported' : 'Not supported'}
+                              </span>
+                            </div>
+                            {o.reason && <p className="option-reason">{renderInline(o.reason, `r-${o.marker}`)}</p>}
+                            {o.evidence && <p className="option-evidence">{renderInline(o.evidence, `e-${o.marker}`)}</p>}
+                          </li>
+                        ))}
+                      </ol>
+                    </section>
+                  </>
+                );
+              }
+              return (
+                <>
+                  <div className="answer-text">
+                    <Markdown text={answer} />
+                    {isLoading && <span className="cursor-blink">▌</span>}
+                  </div>
+                  {checks && (
+                    <details className="answer-checks">
+                      <summary>How the answer was checked</summary>
+                      <Markdown text={checks} />
+                    </details>
+                  )}
+                </>
+              );
+            })()}
           </div>
 
           {done && confidence !== null && (
@@ -687,10 +752,14 @@ function App() {
             </div>
           )}
 
-          {done && graphPaths.length > 0 && (
+          {done && graphPaths.length > 0 && (() => {
+            const sharedFacts = pathLabel === 'Shared facts';
+            return (
             <div className="graph-reasoning" id="graph-reasoning" aria-labelledby="graph-reasoning-title">
               <div className="graph-reasoning-header">
-                <h3 className="evidence-label" id="graph-reasoning-title">Reasoning path</h3>
+                <h3 className="evidence-label" id="graph-reasoning-title">
+                  {sharedFacts ? 'Shared facts' : 'Reasoning path'}
+                </h3>
                 {mode === 'files' && (
                   <button
                     type="button"
@@ -702,11 +771,18 @@ function App() {
                   </button>
                 )}
               </div>
-              <p className="graph-reasoning-note">
-                Facts the knowledge graph followed{graphSeeds.length ? ` from ${graphSeeds.join(', ')}` : ''} to
-                find the evidence below. They were extracted automatically and given to the model with the
-                text, so check them against the evidence.
-              </p>
+              {sharedFacts ? (
+                <p className="graph-reasoning-note">
+                  The same claim found in both files' knowledge graphs, matched by meaning even when worded
+                  differently. Facts are extracted automatically, so hover over one to see its sentence.
+                </p>
+              ) : (
+                <p className="graph-reasoning-note">
+                  Facts the knowledge graph followed{graphSeeds.length ? ` from ${graphSeeds.join(', ')}` : ''} to
+                  find the evidence below. They were extracted automatically and given to the model with the
+                  text, so check them against the evidence.
+                </p>
+              )}
               <ol className="graph-paths">
                 {graphPaths.map((path, i) => {
                   const pinned = pinnedHighlight?.key === `path:${i}`;
@@ -720,7 +796,9 @@ function App() {
                       <div className="graph-path-facts">
                         {path.facts.map((f, j) => (
                           <p key={j} className="graph-fact">
-                            {j > 0 && <span className="graph-fact-then">then</span>}
+                            {j > 0 && (
+                              <span className="graph-fact-then">{path.kind === 'shared' ? 'same as' : 'then'}</span>
+                            )}
                             <strong>{f.sourceLabel}</strong> <span className="fact-relation">{f.relation}</span>{' '}
                             <strong>{f.targetLabel}</strong>
                             <span className="graph-fact-file" title={f.evidence}> · {f.filename}</span>
@@ -742,7 +820,8 @@ function App() {
                 })}
               </ol>
             </div>
-          )}
+            );
+          })()}
 
           {done && chunks.length > 0 && (
             <div className="evidence-section">
@@ -827,8 +906,19 @@ function App() {
               <ul className="sources-list">
                 {sources.map((src, i) => (
                   <li key={i} className="source-item">
-                    <span className="source-icon">📄</span>
-                    <span className="source-text">{src}</span>
+                    <span className="source-icon" aria-hidden="true">📄</span>
+                    {/* Opens the full text on its own page in a new tab */}
+                    <a
+                      className="source-link"
+                      href={sourcePageHref(src)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Open the full text of ${formatSourceLabel(src)} in a new tab`}
+                    >
+                      <span className="source-name">{formatSourceLabel(src)}</span>
+                      <span className="source-text">{sourcePath(src)}</span>
+                      <span className="visually-hidden"> (opens in a new tab)</span>
+                    </a>
                   </li>
                 ))}
               </ul>

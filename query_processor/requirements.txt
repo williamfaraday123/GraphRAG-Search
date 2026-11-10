@@ -6,6 +6,10 @@ uvicorn
 grpcio
 grpcio-tools
 pymilvus
+# pymilvus imports pandas on load. Windows Smart App Control blocked pandas 3.1.1's unsigned
+# pandas_parser .pyd ("DLL load failed ... An Application Control policy has blocked this file");
+# 2.2.3's binaries are allowed.
+pandas==2.2.3
 neo4j
 langchain
 langchain-community

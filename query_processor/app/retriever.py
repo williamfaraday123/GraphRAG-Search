@@ -5,6 +5,7 @@ from services.object_storage_client import ObjectStorageRetriever
 from embedding import EmbeddingService
 from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, WIKI_CORPUS_ID
 from graph_retrieval import GraphRetriever
+from file_similarity import FileSimilarity
 import logging
 import os
 
@@ -28,6 +29,8 @@ class HybridRetriever:
         )
         # Follows facts extracted from uploads (knowledge_graph.py) to chunks vector search misses
         self.graph_retriever = GraphRetriever(self.neo4j_service.driver, self.embedding_service)
+        # "Which two files are most similar?": compares files' knowledge graphs (file_similarity.py)
+        self.file_similarity = FileSimilarity(self.neo4j_service.driver, self.embedding_service)
 
         logger.info("HybridRetriever initialized with Milvus, Neo4j, MinIO, and Local Embeddings")
 

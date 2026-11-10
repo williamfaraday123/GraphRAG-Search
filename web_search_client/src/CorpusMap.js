@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import './CorpusMap.css';
 
 // Categorical slots in fixed order (validated on the app's dark surface).
@@ -22,10 +22,13 @@ const radius = (e) => 5 + Math.sqrt(e.chunkCount) * 3;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 function CorpusMap({
-  apiBase, corpusId, files, scopeFileIds, onClose,
+  apiBase, corpusId, files, onClose,
+  // scopeFileIds: the current file selection (to notice it changed since the map was built).
+  // request: { id, fileIds } from the Map button; every new id builds the map for its fileIds.
+  scopeFileIds, request,
   // What to highlight, from the results below the map: hovered, or pinned with "Show in map".
   //   { key, kind: 'chunk', chunkId }                    an evidence chunk's entities and facts
-  //   { key, kind: 'path', facts: [{source, target, relation, ...}] }   a knowledge-graph reasoning path
+  //   { key, kind: 'path', label, facts: [{source, target, relation, ...}] }   a reasoning path, or shared facts
   hoverHighlight = null, pinnedHighlight = null, onClearPinned, onBackToEvidence,
 }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
@@ -34,12 +37,18 @@ function CorpusMap({
   const [selectedId, setSelectedId] = useState(null);
   const [hover, setHover] = useState(null); // { id, x, y }
   const [openClusters, setOpenClusters] = useState(() => new Set());
-  const [builtScope, setBuiltScope] = useState(scopeFileIds);
+  const [builtScope, setBuiltScope] = useState(request.fileIds);
   const graphRef = useRef(null);
 
-  const load = useCallback((ids) => {
-    setState({ loading: true, error: null, data: null });
-    setSelectedId(null);
+  // Builds the map for each Map click (a new request id), so it always reflects the
+  // selection at that moment and any facts extracted since the last build. A slower,
+  // superseded build never overwrites a newer one.
+  const latest = useRef(0);
+  const { id: requestId, fileIds: requestFileIds } = request;
+  useEffect(() => {
+    const ids = requestFileIds;
+    latest.current = requestId;
+    setState((prev) => ({ loading: true, error: null, data: prev.data }));
     setBuiltScope(ids);
     const query = ids.length ? `?fileIds=${ids.map(encodeURIComponent).join(',')}` : '';
     fetch(`${apiBase}/api/v1/corpora/${encodeURIComponent(corpusId)}/map${query}`)
@@ -48,13 +57,17 @@ function CorpusMap({
         if (!res.ok) throw new Error(body.message || `Could not build the corpus map (${res.status})`);
         return body;
       })
-      .then((data) => setState({ loading: false, error: null, data }))
-      .catch((err) => setState({ loading: false, error: err.message, data: null }));
-  }, [apiBase, corpusId]);
-
-  // Build once on open; afterwards the user rebuilds explicitly when the scope changes
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { load(scopeFileIds); }, [load]);
+      .then((data) => {
+        if (latest.current !== requestId) return;
+        setSelectedId(null);
+        setState({ loading: false, error: null, data });
+      })
+      .catch((err) => {
+        if (latest.current === requestId) setState({ loading: false, error: err.message, data: null });
+      });
+    // requestFileIds belongs to requestId: a new request always comes with a new id
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase, corpusId, requestId]);
 
   const scopeChanged = builtScope.join(',') !== scopeFileIds.join(',');
   const data = state.data;
@@ -119,6 +132,7 @@ function CorpusMap({
       });
       return {
         kind: 'path',
+        label: active.label || 'Reasoning path',
         facts: active.facts,
         ids: new Set(keys.filter((k) => visibleIds.has(k))),
         missing: keys.filter((k) => !entityById[k]).length,
@@ -254,24 +268,25 @@ function CorpusMap({
           )}
         </div>
         <div className="file-actions">
-          <button type="button" className="file-action" onClick={() => load(scopeFileIds)} disabled={state.loading}>
-            {state.loading ? 'Building…' : 'Rebuild'}
-          </button>
           <button type="button" className="file-action" onClick={onClose}>Close</button>
         </div>
       </div>
 
       {scopeChanged && !state.loading && (
-        <p className="corpus-map-note">File selection changed. Rebuild to map the {scopeFileIds.length
+        <p className="corpus-map-note">File selection changed. Click Map to map the {scopeFileIds.length
           ? plural(scopeFileIds.length, 'selected file') : 'whole workspace'}.</p>
       )}
-      {state.loading && <p className="corpus-map-note">Reading chunks and finding entities and themes…</p>}
+      {state.loading && (
+        <p className="corpus-map-note" role="status">
+          {data ? 'Updating the map…' : 'Reading chunks and finding entities and themes…'}
+        </p>
+      )}
       {state.error && <p className="upload-error">{state.error}</p>}
       {data && progress?.enabled && progress.pending > 0 && (
         <p className="corpus-map-status" role="status">
           Extracting facts with the local model: {progress.done + progress.failed} of{' '}
           {plural(progress.total, 'chunk')} read.{' '}
-          {isKg ? 'Rebuild later to add the rest.' : 'Until facts are ready, this is a quick keyword map. Rebuild later to see them.'}
+          {isKg ? 'Click Map later to add the rest.' : 'Until facts are ready, this is a quick keyword map. Click Map later to see them.'}
         </p>
       )}
       {data && progress?.failed > 0 && (
@@ -287,16 +302,16 @@ function CorpusMap({
             {evidence.kind === 'path' ? (
               evidence.inMap ? (
                 <>
-                  <strong>Reasoning path:</strong> {plural(evidence.facts.length, 'fact')} linking{' '}
+                  <strong>{evidence.label}:</strong> {plural(evidence.facts.length, 'fact')} linking{' '}
                   {[...new Set(evidence.facts.flatMap((f) => [f.sourceLabel, f.targetLabel]))].join(', ')}.
-                  {evidence.missing > 0 && ` ${plural(evidence.missing, 'entity').replace('entitys', 'entities')} not in this map (rebuild with its file selected).`}
+                  {evidence.missing > 0 && ` ${plural(evidence.missing, 'entity').replace('entitys', 'entities')} not in this map (select its file and click Map).`}
                 </>
               ) : (
-                <>This reasoning path's entities aren't in this map. Rebuild with their files selected to see it.</>
+                <>These facts' entities aren't in this map. Select their files and click Map to see it.</>
               )
             ) : !evidence.chunk ? (
               <>The {showingPinned ? 'selected' : 'hovered'} evidence chunk isn't in this map.
-                Rebuild with its file selected to see it.</>
+                Select its file and click Map to see it.</>
             ) : (
               <>
                 <strong>Evidence:</strong> {evidence.chunk.filename} · chunk {evidence.chunk.chunkIndex + 1}.{' '}
@@ -313,7 +328,7 @@ function CorpusMap({
             <div className="file-actions">
               {onBackToEvidence && (
                 <button type="button" className="file-action" onClick={onBackToEvidence}>
-                  {evidence.kind === 'path' ? 'Back to reasoning' : 'Back to evidence'}
+                  {evidence.kind === 'path' ? `Back to ${evidence.label.toLowerCase().replace(' path', '')}` : 'Back to evidence'}
                 </button>
               )}
               {onClearPinned && (

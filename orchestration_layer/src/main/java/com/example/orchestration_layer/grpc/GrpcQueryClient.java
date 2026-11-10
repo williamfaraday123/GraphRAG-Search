@@ -112,7 +112,10 @@ public class GrpcQueryClient {
                             fact.put("evidence", f.getEvidence());
                             facts.add(fact);
                         }
-                        graphPaths.add(Map.of("score", p.getScore(), "facts", facts));
+                        graphPaths.add(Map.of(
+                                "score", p.getScore(),
+                                "kind", p.getKind().isEmpty() ? "reasoning" : p.getKind(),
+                                "facts", facts));
                     }
                     var done = SearchEvent.done(
                             a.getText(),

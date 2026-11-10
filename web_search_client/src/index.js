@@ -2,12 +2,16 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
+import SourceView from './SourceView';
 import reportWebVitals from './reportWebVitals';
+
+// ?source=<uri>: the full-text page a Sources link opens in a new tab
+const source = new URLSearchParams(window.location.search).get('source');
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>
-    <App />
+    {source ? <SourceView uri={source} /> : <App />}
   </React.StrictMode>
 );
 

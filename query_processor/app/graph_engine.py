@@ -4,9 +4,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from llm_client import chat_client
 from retriever import HybridRetriever
 from document_text import display_name
+from file_similarity import similarity_table
+from graph_retrieval import fact_text
 import networkx as nx
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,7 @@ class AgentState(TypedDict):
     graph_scores: Dict[str, float]   # Stores PageRank scores for debugging/logging
     kg_paths: List[dict]          # Knowledge-graph fact paths found across rounds (best first)
     kg_seeds: List[str]           # Entities named in the queries that the walk started from
+    file_similarity: dict         # "Which files are most similar?": file_similarity.py result, else None
 
 # --- Helper: Graph Analysis ---
 def calculate_authority_scores(chunks: List[Dict], edges: List[Dict]) -> Dict[str, float]:
@@ -218,7 +222,21 @@ def make_retrieve_context_node(retriever: HybridRetriever):
         ranked_chunks = _rank_chunks(all_chunks, pr_scores)
         top_context = ranked_chunks[:20]
 
+        # File-similarity questions: compare the files' knowledge graphs once (first round)
+        similarity = state.get("file_similarity")
+        similarity_note = ""
+        corpus_id = state.get("corpus_id") or "wiki"
+        if similarity is None and corpus_id != "wiki" and is_file_comparison(state["query"]):
+            try:
+                similarity = retriever.file_similarity.compare(corpus_id, state.get("file_ids") or None)
+            except Exception:
+                logger.exception("File similarity failed")
+            if similarity:
+                similarity_note = (f" Compared {len(similarity['files'])} files' knowledge graphs "
+                                   f"({len(similarity['pairs'])} pairs).")
+
         return {
+            "file_similarity": similarity,
             "all_chunks": all_chunks,
             "all_relations": all_relations,
             "refined_context": top_context,
@@ -230,7 +248,7 @@ def make_retrieve_context_node(retriever: HybridRetriever):
                 f"Retrieved {len(new_chunks)} new chunk(s) across {len(queries)} "
                 f"quer{'y' if len(queries) == 1 else 'ies'}. "
                 f"Top authoritative node: {top_context[0]['id'] if top_context else 'None'}"
-                + kg_note
+                + kg_note + similarity_note
             ]
         }
     return retrieve_context
@@ -350,8 +368,369 @@ def format_kg_facts(paths: List[dict]) -> str:
     return "\n".join(lines)
 
 
+# "1. capital  2. narratives" or "A) capital B) narratives": an enumerated marker at the start
+# or after whitespace, followed by the option text
+_OPTION_MARKER = re.compile(r"(?:^|(?<=\s))\(?([1-9][0-9]?|[A-H])[.)]\s+")
+_ALL_FILES = re.compile(r"\b(both|all|each|every)\s+(?:of\s+the\s+)?(files|sources|documents|texts|passages)\b", re.I)
+
+
+def listed_options(query: str) -> List[tuple]:
+    """[(marker, text)] for answer options listed in the query, numbered 1, 2, ... or
+    lettered A, B, ...; empty when the query lists fewer than two options."""
+    found = list(_OPTION_MARKER.finditer(query))
+    for start in range(len(found)):
+        first = found[start].group(1)
+        if first not in ("1", "A"):
+            continue
+        run = [found[start]]
+        for m in found[start + 1:]:
+            prev = run[-1].group(1)
+            expected = str(int(prev) + 1) if prev.isdigit() else chr(ord(prev) + 1)
+            if m.group(1) == expected:
+                run.append(m)
+        if len(run) >= 2:
+            ends = [m.start() for m in run[1:]] + [len(query)]
+            return [(m.group(1), query[m.end():end].strip(" .;,")) for m, end in zip(run, ends)]
+    return []
+
+
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+_COUNT_EXPLICIT = re.compile(r"\b(?:which|choose|select|pick|name|give)\s+(one|two|three|four|five|[1-5])\b", re.I)
+# "Which reason ...", "Which option is ..." (singular noun right after which/what) asks for one
+_COUNT_SINGULAR = re.compile(
+    r"\b(?:which|what)\s+(?:\w+\s+)?(?:reason|option|statement|factor|cause|answer|one|explanation|example)\b(?!s)", re.I)
+
+
+def answer_count(query: str):
+    """How many options the query asks for (e.g. 'Which TWO ...' -> 2, 'Which reason ...' -> 1),
+    or None when it doesn't say."""
+    question = query[: _OPTION_MARKER.search(query).start()] if _OPTION_MARKER.search(query) else query
+    m = _COUNT_EXPLICIT.search(question)
+    if m:
+        word = m.group(1).lower()
+        return int(word) if word.isdigit() else _COUNT_WORDS[word]
+    return 1 if _COUNT_SINGULAR.search(question) else None
+
+
+_COMMON_RULES = """Answer the query using only the context below. The context is grouped by file under
+headings like "=== File 1: report.pdf ==="; cite a file by its name only, e.g. [report.pdf]
+(not "File 1"). Treat each file as one source. Reply in Markdown with exactly the two sections
+shown, starting each with its ### heading, in order, and nothing before or after them."""
+
+
+def _options_prompt(query, context_text, options, files) -> str:
+    """Multiple choice: check every option against a quoted sentence first (stops the model
+    picking distractors the text attributes to a different subject: 0/8 correct without it,
+    6/6 with), then answer. The UI shows the answer first and the per-option breakdown below it
+    (web_search_client/src/Markdown.js parseOptionChecks)."""
+    option_list = "\n".join(f"{marker}. {text}" for marker, text in options)
+    # The examples are deliberately about another topic: small models copy examples taken
+    # from the task itself instead of reasoning. Evidence comes before the verdict in each
+    # bullet so the verdict is decided from the quotes, not guessed first.
+    subject_rule = (
+        "A sentence counts only if it states the option as an answer to the query, about the subject the "
+        "query asks about: not about a different country, person or group mentioned nearby, not merely "
+        "sharing some words with the option, and not a related but different idea stretched to fit."
+    )
+    count = answer_count(query)
+    choose = (
+        f"Choose exactly {count} option{'s' if count > 1 else ''}, as the query asks; if more are SUPPORTED, "
+        "choose the one(s) the context states most directly."
+        if count else "Choose only SUPPORTED options, matching the number of answers the query asks for."
+    )
+    if _ALL_FILES.search(query) and len(files) > 1:
+        rule = (
+            f"{subject_rule} The query asks what is supported in EVERY file ({', '.join(files)}). In each "
+            "bullet, give each file's sentence for the option, or write 'no sentence' for a file that has "
+            "none. The option is SUPPORTED only if every file has a sentence that counts; one missing file "
+            "makes it NOT SUPPORTED."
+        )
+        examples = (
+            '- **1. lower rents**: [survey.pdf] "Rents fell sharply in the 1990s." [report.docx] no sentence. NOT SUPPORTED: only one file says it.\n'
+            '- **3. more tourists**: [survey.pdf] "Tourists visited the old town." [report.docx] "Tourism grew." NOT SUPPORTED: both files mention tourists, but neither gives them as a reason for the growth the query asks about.\n'
+            '- **4. new rail links**: [survey.pdf] "Growth followed the new rail links." [report.docx] "The rail links drew new firms." SUPPORTED: both files give it as a reason for the growth.'
+        )
+    else:
+        rule = f"{subject_rule} The option must also meet every other condition in the query."
+        examples = (
+            '- **2. lower rents**: [survey.pdf] "Rents fell in Leeds in the 1990s." NOT SUPPORTED: this is about Leeds, not the city the query asks about.\n'
+            '- **4. new rail links**: [report.docx] "The city grew after new rail links opened." SUPPORTED: growth is tied directly to the rail links.'
+        )
+    return f"""{_COMMON_RULES}
+
+The query lists {len(options)} options:
+{option_list}
+
+### Checked evidence
+Exactly {len(options)} bullets, one per option above, in that order (1 first), and no other text.
+Each bullet: the option number and text in bold, then the exact sentence(s) from the context with
+their [file name], then SUPPORTED or NOT SUPPORTED, then a short reason. {rule}
+For example (a different topic):
+{examples}
+
+### Answer
+One bold line naming the options you choose, as **Answer: <option numbers> (<short option names>)**.
+{choose} Then one or two sentences on why, citing [file name]. Do not list the options again.
+
+Query: {query}
+
+Context:
+{context_text}"""
+
+
+def restore_option_labels(answer: str, options) -> str:
+    """The model sometimes garbles option text when copying it ("didn-'t"); put the query's own
+    wording back into each '**N. ...**' label."""
+    text_by_marker = {marker.upper(): text for marker, text in options}
+
+    def fix(m):
+        marker = m.group(2).upper()
+        return f"{m.group(1)}**{m.group(2)}. {text_by_marker[marker]}**" if marker in text_by_marker else m.group(0)
+
+    return re.sub(r"^(\s*[-*]\s+)\*\*([1-9][0-9]?|[A-Ha-h])[.)]\s+[^*\n]+\*\*", fix, answer, flags=re.M)
+
+
+def _words(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", text.lower().replace("’", "'").replace("'", ""))
+
+
+def _quote_in(quote: str, text_trigrams: set) -> bool:
+    """Whether a quoted sentence appears in a file's text, allowing small copying slips
+    (punctuation, a changed word): 80% of its word trigrams must be there."""
+    words = _words(quote)
+    if len(words) < 3:
+        return False
+    trigrams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
+    return sum(t in text_trigrams for t in trigrams) >= 0.8 * len(trigrams)
+
+
+_OPTION_CHECK = re.compile(r"^(\s*[-*]\s+\*\*([1-9][0-9]?|[A-Ha-h])[.)]\s+[^*\n]+\*\*\s*:?\s*)(.*)$", re.M)
+_FILE_QUOTE = re.compile(r"\[([^\]\n]+)\]\s*(?:\"([^\"\n]+)\"|“([^”\n]+)”|no sentence)", re.I)
+_VERDICT_WORD = re.compile(r"\b(NOT\s+SUPPORTED|SUPPORTED)\b\s*:?\s*(.*)$", re.I | re.S)
+_ANSWER_LINE = re.compile(r"^\*\*Answer:[^\n]*\*\*[ \t]*\n?(.*?)(?=\n\s*\n|\Z)", re.M | re.S)
+
+
+def enforce_every_file(answer: str, options, chunks: List[dict], files: List[str]) -> str:
+    """For 'supported in both/all files' questions: the model sometimes marks or picks an
+    option that only one file supports. Checks each option's quotes against the text of the
+    file they are cited from; an option counts only if every file has a quote that is really
+    in it. Failed options are marked NOT SUPPORTED and taken out of the Answer line."""
+    text_by_file: Dict[str, str] = {}
+    for c in chunks:
+        name = display_name((c.get("source") or "Unknown").rsplit("/", 1)[-1])
+        text_by_file[name] = text_by_file.get(name, "") + " " + (c.get("content") or "")
+    index = {}
+    for name, text in text_by_file.items():
+        w = _words(text)
+        index[name] = {tuple(w[i:i + 3]) for i in range(len(w) - 2)}
+
+    supported, failed = set(), {}
+    out_lines = []
+    for line in answer.split("\n"):
+        m = _OPTION_CHECK.match(line)
+        if not m:
+            out_lines.append(line)
+            continue
+        marker, rest = m.group(2).upper(), m.group(3)
+        verdict = _VERDICT_WORD.search(rest)
+        missing = []
+        for name in files:
+            quotes = [q[1] or q[2] for q in _FILE_QUOTE.findall(rest)
+                      if q[0].strip().lower() == name.lower() and (q[1] or q[2])]
+            if not any(_quote_in(q, index.get(name, set())) for q in quotes):
+                missing.append(name)
+        failed[marker] = missing
+        said_supported = bool(verdict) and not verdict.group(1).upper().startswith("NOT")
+        if said_supported and not missing:
+            supported.add(marker)
+        elif said_supported:
+            reason = f"{' and '.join(missing)} {'has' if len(missing) == 1 else 'have'} no sentence that says it."
+            line = m.group(1) + rest[: verdict.start()].rstrip() + f" NOT SUPPORTED: {reason}"
+        out_lines.append(line)
+    answer = "\n".join(out_lines)
+
+    # Rebuild the Answer line when it names an option that didn't pass
+    def fix_answer(m):
+        # "**Answer: 1 (plenty of capital), 4 (narratives)**" -> ["1", "4"]
+        head_text = re.sub(r"\([^)]*\)", "", m.group(0).split("\n")[0][len("**Answer:"):])
+        named = re.findall(r"\b([1-9][0-9]?|[A-H])\b", head_text)
+        if all(n.upper() in supported for n in named) and named:
+            return m.group(0)
+        label = {mk.upper(): text for mk, text in options}
+        keep = [mk.upper() for mk, _ in options if mk.upper() in supported]
+        dropped = [n.upper() for n in named if n.upper() not in supported]
+        if keep:
+            head = "**Answer: " + ", ".join(f"{k} ({label[k]})" for k in keep) + "**"
+            why = f"{'Only this option is' if len(keep) == 1 else 'These options are'} supported by a sentence in every file ({', '.join(files)})."
+        else:
+            head = "**Answer: none of the options is supported in every file**"
+            why = f"No option has a supporting sentence in every file ({', '.join(files)})."
+        if dropped:
+            for d in dropped:
+                why += (f" Option {d} is not: {' and '.join(failed[d])} has no sentence for it." if failed.get(d)
+                        else f" Option {d} is not: its check above found it not supported.")
+        return f"{head}  \n{why}"
+
+    return _ANSWER_LINE.sub(fix_answer, answer, count=1)
+
+
+def _open_prompt(query, context_text) -> str:
+    # One sentence per point the context makes, and stop. Tried and dropped: a quoted-evidence
+    # section first (the answer then retold every quote, relevant or not), and "at most 3
+    # sentences" (the model fills the budget with invented cause-and-effect links). Asked "How
+    # did Europe contribute to American film dominance?", those drifted into narratives,
+    # Germany and Italy; this answers in the one sentence the text supports.
+    return f"""Answer the query using only the context below. The context is grouped by file under
+headings like "=== File 1: report.pdf ==="; cite a file by its name only, e.g. [report.pdf] (not
+"File 1"). Treat each file as one source.
+
+Find the sentences in the context that answer the query itself. Write one sentence for each point
+they make, ending with its [file name], with the key terms in **bold**. Stop when there are no more
+such points: if the context makes only one point that answers the query, your answer is one
+sentence. Leave out points that are only on the same topic. Never join separate points into a claim
+about cause or effect that no single sentence of the context makes, and do not end with a summary
+sentence. If the query asks for a summary, write one sentence for each main point instead. Reply in
+Markdown with no headings and no list of citations.
+
+Query: {query}
+
+Context:
+{context_text}"""
+
+
+# --- File similarity ("Which 2 files are most similar?") ---
+
+_FILE_WORDS = re.compile(r"\b(?:files?|sources?|documents?|docs|texts?|recordings?|uploads?|transcripts?)\b", re.I)
+_SIMILARITY = re.compile(
+    r"\b(?:most|least|more|less)\s+(?:similar|alike|different|related)\b|\bclosest\b|\bsimilarity\b"
+    r"|\bresembl\w*|\bmost\s+in\s+common\b|\boverlap\w*", re.I)
+_LEAST = re.compile(r"\b(?:least|less)\s+(?:similar|alike|related)\b|\bmost\s+different\b", re.I)
+
+
+def is_file_comparison(query: str) -> bool:
+    """Asks which files are most (or least) alike, as opposed to a question about their content."""
+    return bool(_SIMILARITY.search(query) and _FILE_WORDS.search(query))
+
+
+def candidate_pairs(state):
+    """Pairs the question is about: all of them, or, for "Which file is closest to
+    sample.docx?", only those with the file the query names."""
+    sim = state.get("file_similarity")
+    if not sim or not sim.get("pairs"):
+        return []
+    query = state["query"].lower()
+    named = [f["filename"] for f in sim["files"]
+             if f["filename"].lower() in query or f["filename"].rsplit(".", 1)[0].lower() in query]
+    if len(named) == 1:
+        return [p for p in sim["pairs"] if named[0] in (p["a_name"], p["b_name"])] or sim["pairs"]
+    return sim["pairs"]
+
+
+def chosen_pair(state):
+    """The pair the answer names: highest graph overlap (lowest for 'least similar'); text
+    similarity decides when no file has any graph data to compare."""
+    pairs = candidate_pairs(state)
+    if not pairs:
+        return None
+    least = bool(_LEAST.search(state["query"]))
+    key =(lambda p: p["embedding"]) if all(p["graph"] == 0 for p in pairs) else (lambda p: (p["graph"], p["embedding"]))
+    return min(pairs, key=key) if least else max(pairs, key=key)
+
+
+def similarity_paths(state, limit=6):
+    """The chosen pair's shared facts, each as a two-fact 'shared' path for the UI and the map."""
+    pair = chosen_pair(state)
+    if not pair:
+        return []
+    return [{"score": s["similarity"], "kind": "shared", "facts": [s["a"], s["b"]]}
+            for s in pair["shared_facts"][:limit]]
+
+
+def _quote(fact):
+    return f"\"{(fact.get('evidence') or fact_text(fact)).strip()}\""
+
+
+def similarity_answer(state) -> str:
+    """The model explains a ranking computed from the knowledge graph; the pair, the notes and
+    the score table come from code, so the model can't pick a different pair or misquote a score."""
+    sim = state["file_similarity"]
+    pair = chosen_pair(state)
+    least = bool(_LEAST.search(state["query"]))
+    a, b = pair["a_name"], pair["b_name"]
+    others = [f for f in sim["files"] if f["filename"] not in (a, b)]
+
+    # One fact per sentence: the extractor often takes several facts from one sentence, and a
+    # sentence listed as both shared and "only in" made the model contradict itself
+    shared_lines, used = [], set()
+    for s in pair["shared_facts"]:
+        qa, qb = _quote(s["a"]), _quote(s["b"])
+        if (qa, qb) not in used:
+            used |= {(qa, qb), qa, qb}
+            shared_lines.append(f"- [{a}] {qa} / [{b}] {qb}")
+    shared = "\n".join(shared_lines) or "- none"
+    distinct = []
+    for f in [x for x in sim["files"] if x["filename"] in (a, b)] + others:
+        quotes = list(dict.fromkeys(q for q in map(_quote, f["only_here"]) if q not in used))[:4]
+        if quotes:
+            distinct.append(f"Only in {f['filename']}:\n" + "\n".join(f"- {q}" for q in quotes))
+    other_names = ", ".join(f["filename"] for f in others)
+    task = (
+        f"First say what {a} and {b} have in common, from the shared facts, citing [file name] after each claim. "
+        + (f"Then say how {other_names} differs, from its own facts. " if others else "")
+        if not least else
+        f"First say what {a} and {b} each cover that the other does not, citing [file name] after each claim. "
+        "Then mention anything they do share, if any. "
+    )
+    prompt = f"""The files below were compared on the knowledge graph extracted from them. {a} and {b} are
+the {'least' if least else 'most'} similar pair. Explain this to the user using only the facts below.
+
+Shared between {a} and {b} (the same claim in both files, possibly worded differently):
+{shared}
+
+{chr(10).join(distinct)}
+
+Write 2 or 3 short sentences (under 35 words each) in one paragraph, with no headings, lists,
+quotations or percentages: sum up each point in a few words of your own. {task}Write file names
+exactly as given, and do not add anything the facts above do not say."""
+    llm = chat_client("ANSWER_MODEL", temperature=0)
+    explanation = llm.invoke([HumanMessage(content=prompt)]).content.strip()
+
+    notes = []
+    by_text = (min if least else max)(candidate_pairs(state), key=lambda p: p["embedding"])
+    if by_text is not pair:
+        notes.append(f"By overall text similarity, **{by_text['a_name']}** and **{by_text['b_name']}** are "
+                     f"{'least' if least else 'most'} alike instead ({by_text['embedding']:.0%} vs "
+                     f"{pair['embedding']:.0%}): the files read alike, but the knowledge graph found "
+                     f"{'fewer' if least else 'more'} shared facts between {a} and {b}.")
+    for p in sim["pairs"]:
+        for name, other, covered in ((p["a_name"], p["b_name"], p["a_covered"]), (p["b_name"], p["a_name"], p["b_covered"])):
+            n_facts = next((f["facts"] for f in sim["files"] if f["filename"] == name), 0)
+            if covered >= 0.6 and n_facts >= 3:
+                notes.append(f"Most of {name}'s facts ({covered:.0%}) also appear in {other}, so it largely "
+                             f"repeats part of {other}.")
+    thin = [f["filename"] for f in sim["files"] if f["facts"] == 0]
+    if thin:
+        notes.append(f"No facts have been extracted from {', '.join(thin)} yet (the knowledge graph may still be "
+                     "building), so it was compared on its entities only.")
+    if all(p["graph"] == 0 for p in candidate_pairs(state)):
+        notes.append("The knowledge graph found nothing shared between any files, so this pair was chosen by text similarity.")
+    elif pair["graph"] < 0.05 and not least:
+        notes.append("Even this pair shares very few facts, so the ranking is weak.")
+
+    parts =[f"**{'Least' if least else 'Most'} similar: {a} and {b}**  ", explanation]
+    if notes:
+        parts.append("\n".join(f"- {n}" for n in notes))
+    parts.append("#### How the files compare\n\n" + similarity_table(sim))
+    parts.append("*Graph overlap*: facts and entities found in both files' knowledge graphs, matched by meaning "
+                 "and weighted so that things every file mentions count less. *Text similarity*: how alike the "
+                 "files' text is overall (a second opinion).")
+    return "\n\n".join(parts)
+
+
 def synthesize_answer(state: AgentState):
     """Step 3: Generate final response"""
+    if state.get("file_similarity"):
+        return {"final_answer": similarity_answer(state)}
     if not state["refined_context"]:
         return {"final_answer": "I couldn't find relevant information in the knowledge base to answer this query."}
 
@@ -367,23 +746,14 @@ def synthesize_answer(state: AgentState):
             "errors, so confirm each against the file text before using it):\n" + facts_text
         )
 
-    # Checking each listed option against a quoted sentence stops the model picking
-    # distractors that the text attributes to a different subject (tested on IELTS-style
-    # multiple choice: 0/8 correct with the old prompt, 6/6 with this one).
-    prompt = f"""Answer the query using only the context below. The context is grouped by file;
-cite claims by file name. Treat each file as one source.
-
-If the query lists answer options, before answering go through EVERY option:
-- quote the exact sentence from the context that supports it, and
-- confirm the sentence is about the subject the query asks about (not a different
-  country, person or group mentioned nearby).
-Mark each option SUPPORTED or NOT SUPPORTED, then give the final answer using only
-SUPPORTED options, matching the number of answers the query asks for.
-
-Query: {state['query']}
-
-Context:
-{context_text}"""
+    files = list(dict.fromkeys(
+        display_name((c.get("source") or "Unknown").rsplit("/", 1)[-1]) for c in state["refined_context"]
+    ))
+    options = listed_options(state["query"])
+    if options:
+        prompt = _options_prompt(state["query"], context_text, options, files)
+    else:
+        prompt = _open_prompt(state["query"], context_text)
 
     if state.get("corpus_id") and state["corpus_id"] != "wiki":
         system_message = SystemMessage(
@@ -396,7 +766,12 @@ Context:
         response = llm.invoke([system_message, HumanMessage(content=prompt)])
     else:
         response = llm.invoke([HumanMessage(content=prompt)])
-    return {"final_answer": response.content}
+    answer = response.content
+    if options:
+        answer = restore_option_labels(answer, options)
+        if _ALL_FILES.search(state["query"]) and len(files) > 1:
+            answer = enforce_every_file(answer, options, state["refined_context"], files)
+    return {"final_answer": answer}
 
 # --- Graph Construction ---
 

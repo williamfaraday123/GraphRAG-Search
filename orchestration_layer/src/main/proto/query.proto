@@ -68,6 +68,9 @@ message FinalAnswer {
 message GraphPath {
   float score = 1;
   repeated GraphFact facts = 2;
+  // "" or "reasoning": facts followed in order to find evidence; "shared": the same fact in
+  // two files (file-similarity questions)
+  string kind = 3;
 }
 
 // One extracted fact: subject -relation-> object, with the sentence and chunk it came from

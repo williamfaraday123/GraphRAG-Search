@@ -3,6 +3,7 @@ from concurrent import futures
 import json
 import logging
 import os
+import re
 import traceback
 from typing import Iterator
 
@@ -11,7 +12,7 @@ import query_pb2
 import query_pb2_grpc
 
 from retriever import HybridRetriever
-from graph_engine import answer_paths, build_query_graph
+from graph_engine import answer_paths, build_query_graph, similarity_paths
 from corpus import normalize_corpus_id, normalize_file_id
 from corpus_indexer import CorpusIndexer
 from knowledge_graph import KnowledgeGraphBuilder
@@ -92,6 +93,7 @@ class QueryProcessorServicer:
                 "graph_scores": {},
                 "kg_paths": [],
                 "kg_seeds": [],
+                "file_similarity": None,
             }
 
             # Stream node-by-node instead of a single blocking invoke() so each
@@ -117,11 +119,11 @@ class QueryProcessorServicer:
 
             answer = state_acc.get("final_answer", "")
 
-            # Stream the answer (Simulated streaming of the final text)
-            words = answer.split()
-            for word in words:
+            # Stream the answer (simulated streaming of the final text). Each piece is a word
+            # plus the whitespace after it, so line breaks survive and Markdown renders in the UI.
+            for piece in re.findall(r"\s*\S+\s*", answer.strip()):
                 chunk_resp = SearchResponse()
-                chunk_resp.chunk.content = word + " "
+                chunk_resp.chunk.content = piece
                 yield chunk_resp
 
             # Final Metadata
@@ -144,10 +146,13 @@ class QueryProcessorServicer:
                 chunk_info.graph_score = c.get("graph_score", 0.0)
                 chunk_info.found_by_graph = bool(c.get("found_by_graph"))
 
-            # Knowledge-graph paths the answer model was given (their facts' chunks are in its context)
-            for path in answer_paths(state_acc):
+            # Knowledge-graph paths the answer model was given (their facts' chunks are in its
+            # context); for file-similarity questions, the facts the two chosen files share
+            paths = similarity_paths(state_acc) if state_acc.get("file_similarity") else answer_paths(state_acc)
+            for path in paths:
                 path_msg = final_resp.answer.graph_paths.add()
                 path_msg.score = path["score"]
+                path_msg.kind = path.get("kind", "reasoning")
                 for f in path["facts"]:
                     fact = path_msg.facts.add()
                     for field in ("source", "source_label", "relation", "target", "target_label",
