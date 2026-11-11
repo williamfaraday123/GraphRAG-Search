@@ -1,5 +1,6 @@
 from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
+from langgraph.config import get_stream_writer
 from langchain_core.messages import HumanMessage, SystemMessage
 from llm_client import chat_client
 from retriever import HybridRetriever
@@ -15,6 +16,31 @@ logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 2
 MAX_SUB_QUERIES = 3
+
+# Key of the answer text the synthesizer streams out while the model writes it
+# (graph.stream(..., stream_mode=["updates", "custom"]) yields ("custom", {ANSWER_TOKEN: text}))
+ANSWER_TOKEN = "answer_token"
+
+
+def _answer_writer():
+    """LangGraph's writer for the "custom" stream mode, or None outside a graph run
+    (e.g. a test calling a node directly)."""
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return None
+
+
+def _write_answer(llm, messages, writer) -> str:
+    """Runs the answer model, passing its text to `writer` piece by piece as it is written,
+    so the UI can show the answer while the model is still writing it."""
+    if writer is None:
+        return llm.invoke(messages).content
+    parts = []
+    for piece in llm.stream(messages):
+        parts.append(piece)
+        writer({ANSWER_TOKEN: piece})
+    return "".join(parts)
 
 # --- State Definition ---
 class AgentState(TypedDict):
@@ -765,7 +791,11 @@ Write 2 or 3 short sentences (under 35 words each) in one paragraph, with no hea
 quotations or percentages: sum up each point in a few words of your own. {task}Write file names
 exactly as given, and do not add anything the facts above do not say."""
     llm = chat_client("ANSWER_MODEL", temperature=0)
-    explanation = llm.invoke([HumanMessage(content=prompt)]).content.strip()
+    writer = _answer_writer()
+    heading = f"**{'Least' if least else 'Most'} similar: {a} and {b}**  "
+    if writer:
+        writer({ANSWER_TOKEN: heading + "\n\n"})
+    explanation = _write_answer(llm, [HumanMessage(content=prompt)], writer).strip()
 
     notes = []
     by_text = (min if least else max)(candidate_pairs(state), key=lambda p: p["embedding"])
@@ -789,14 +819,16 @@ exactly as given, and do not add anything the facts above do not say."""
     elif pair["graph"] < 0.05 and not least:
         notes.append("Even this pair shares very few facts, so the ranking is weak.")
 
-    parts =[f"**{'Least' if least else 'Most'} similar: {a} and {b}**  ", explanation]
+    rest = []
     if notes:
-        parts.append("\n".join(f"- {n}" for n in notes))
-    parts.append("#### How the files compare\n\n" + similarity_table(sim))
-    parts.append("*Graph overlap*: facts and entities found in both files' knowledge graphs, matched by meaning "
-                 "and weighted so that things every file mentions count less. *Text similarity*: how alike the "
-                 "files' text is overall (a second opinion).")
-    return "\n\n".join(parts)
+        rest.append("\n".join(f"- {n}" for n in notes))
+    rest.append("#### How the files compare\n\n" + similarity_table(sim))
+    rest.append("*Graph overlap*: facts and entities found in both files' knowledge graphs, matched by meaning "
+                "and weighted so that things every file mentions count less. *Text similarity*: how alike the "
+                "files' text is overall (a second opinion).")
+    if writer:
+        writer({ANSWER_TOKEN: "\n\n" + "\n\n".join(rest)})
+    return "\n\n".join([heading, explanation] + rest)
 
 
 def synthesize_answer(state: AgentState):
@@ -827,18 +859,18 @@ def synthesize_answer(state: AgentState):
     else:
         prompt = _open_prompt(state["query"], context_text)
 
+    messages = [HumanMessage(content=prompt)]
     if state.get("corpus_id") and state["corpus_id"] != "wiki":
-        system_message = SystemMessage(
+        messages.insert(0, SystemMessage(
             content=(
                 "Answer only from the provided uploaded-file context. Do not use outside "
                 "knowledge. If the context does not contain the answer, say that the "
                 "uploaded files do not provide enough information."
             )
-        )
-        response = llm.invoke([system_message, HumanMessage(content=prompt)])
-    else:
-        response = llm.invoke([HumanMessage(content=prompt)])
-    answer = response.content
+        ))
+    # Streamed to the UI as it is written; the corrections below reach it with the final
+    # answer, which replaces the streamed text
+    answer = _write_answer(llm, messages, _answer_writer())
     if options:
         answer = restore_option_labels(answer, options)
         if _ALL_FILES.search(state["query"]) and len(files) > 1:

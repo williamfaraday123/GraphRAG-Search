@@ -7,7 +7,7 @@ import { formatSourceLabel, sourcePageHref, sourcePath } from './sourceLabel';
 
 function App() {
   const [query, setQuery] = useState('');
-  const [mode, setMode] = useState('wiki');
+  const [mode, setMode] = useState('files');
   const [corpusId, setCorpusId] = useState(
     () => window.localStorage.getItem('graphrag-corpus-id') || ''
   );
@@ -48,6 +48,7 @@ function App() {
   const [done, setDone] = useState(false);
   const eventSourceRef = useRef(null);
   const resultRef = useRef(null);
+  const answerRef = useRef(null);
 
   useEffect(() => {
     if (!corpusId) return undefined;
@@ -107,6 +108,13 @@ function App() {
     }
   }, [scrollToMap]);
 
+  // Once the answer is complete, bring it into view (jsdom has no scrollIntoView)
+  useEffect(() => {
+    if (done && answerRef.current) {
+      answerRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    }
+  }, [done]);
+
   // Same for the file preview opened by the Preview button
   useEffect(() => {
     if (scrollToPreview && previewRef.current) {
@@ -165,11 +173,13 @@ function App() {
     ? { key: 'path:all', kind: 'path', label: pathLabel, facts: graphPaths.flatMap((p) => p.facts), anchorId: 'graph-reasoning' }
     : { key: `path:${index}`, kind: 'path', label: pathLabel, facts: graphPaths[index].facts, anchorId: `graph-path-${index}` });
 
-  const chooseMode = useCallback(async (nextMode) => {
-    setMode(nextMode);
-    resetState();
-    if (nextMode !== 'files' || corpusId) return;
-
+  // "My files" needs an upload workspace: created on first use (on page load, since it's
+  // the default mode) and remembered in local storage. The ref stops a second request while
+  // one is in flight (React runs effects twice in development).
+  const workspaceRequested = useRef(false);
+  const ensureWorkspace = useCallback(async () => {
+    if (corpusId || workspaceRequested.current) return;
+    workspaceRequested.current = true;
     setCreatingWorkspace(true);
     setCorpusError(null);
     try {
@@ -180,10 +190,20 @@ function App() {
       setCorpusId(workspace.corpusId);
     } catch (err) {
       setCorpusError(err.message);
+      workspaceRequested.current = false; // switching back to My files retries
     } finally {
       setCreatingWorkspace(false);
     }
-  }, [corpusId, resetState]);
+  }, [corpusId]);
+
+  useEffect(() => {
+    if (mode === 'files') ensureWorkspace();
+  }, [mode, ensureWorkspace]);
+
+  const chooseMode = useCallback((nextMode) => {
+    setMode(nextMode);
+    resetState();
+  }, [resetState]);
 
   const handleUpload = useCallback(async (e) => {
     e.preventDefault();
@@ -477,19 +497,19 @@ function App() {
       <div className="mode-selector" role="group" aria-label="Search mode">
         <button
           type="button"
-          className={`mode-button ${mode === 'wiki' ? 'active' : ''}`}
-          aria-pressed={mode === 'wiki'}
-          onClick={() => chooseMode('wiki')}
-        >
-          Wiki dump
-        </button>
-        <button
-          type="button"
           className={`mode-button ${mode === 'files' ? 'active' : ''}`}
           aria-pressed={mode === 'files'}
           onClick={() => chooseMode('files')}
         >
           My files
+        </button>
+        <button
+          type="button"
+          className={`mode-button ${mode === 'wiki' ? 'active' : ''}`}
+          aria-pressed={mode === 'wiki'}
+          onClick={() => chooseMode('wiki')}
+        >
+          Wiki dump
         </button>
       </div>
 
@@ -689,7 +709,7 @@ function App() {
 
       {(streamedText || done) && (
         <div className="results-panel" ref={resultRef}>
-          <div className="answer-section">
+          <div className="answer-section" ref={answerRef}>
             <h2 className="answer-label">Answer</h2>
             {(() => {
               // The model writes "### Checked evidence" then "### Answer" (it reasons before it

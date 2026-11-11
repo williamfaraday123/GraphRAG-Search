@@ -47,13 +47,16 @@ def fact_text(fact):
 
 
 def named_entities(query, labels):
-    """Entity keys whose every content word appears in the query (loose stem match)."""
+    """Entity keys any of whose names (label, or list of label and aliases) has every
+    content word in the query (loose stem match)."""
     query_words = {w.lower().replace("’", "'") for w in _WORD.findall(query)}
     found = []
-    for key, label in labels.items():
-        words = _content_words(label)
-        if words and all(_word_matches(w, query_words) for w in words):
-            found.append(key)
+    for key, names in labels.items():
+        for label in ([names] if isinstance(names, str) else names):
+            words = _content_words(label)
+            if words and all(_word_matches(w, query_words) for w in words):
+                found.append(key)
+                break
     # Prefer the most specific: drop "hollywood" when "hollywood films" also matched
     return [k for k in found if not any(o != k and f" {k} " in f" {o} " for o in found)]
 
@@ -71,6 +74,7 @@ class GraphRetriever:
                 WHERE size($file_ids) = 0 OR f.file_id IN $file_ids
                 OPTIONAL MATCH (c:Chunk {chunk_id: f.chunk_id})
                 RETURN a.key AS source, a.name AS source_label, b.key AS target, b.name AS target_label,
+                       coalesce(a.aliases, []) AS source_aliases, coalesce(b.aliases, []) AS target_aliases,
                        f.relation AS relation, f.chunk_id AS chunk_id, f.file_id AS file_id,
                        f.evidence AS evidence, c.source AS uri
                 LIMIT $limit
@@ -100,14 +104,17 @@ class GraphRetriever:
         if not facts:
             return empty
 
-        labels, by_entity = {}, defaultdict(list)
+        labels, names, by_entity = {}, {}, defaultdict(list)
         for f in facts:
             labels.setdefault(f["source"], f["source_label"])
             labels.setdefault(f["target"], f["target_label"])
+            # A merged entity is found by any of its names (entity_resolution.py)
+            names.setdefault(f["source"], [f["source_label"], *f.pop("source_aliases", [])])
+            names.setdefault(f["target"], [f["target_label"], *f.pop("target_aliases", [])])
             by_entity[f["source"]].append(f)
             by_entity[f["target"]].append(f)
 
-        seeds = {key: NAMED_SEED_WEIGHT for key in named_entities(query, labels)}
+        seeds = {key: NAMED_SEED_WEIGHT for key in named_entities(query, names)}
         named = set(seeds)
         context_chunks = set(list(vector_chunk_ids)[:CONTEXT_SEED_CHUNKS])
         for f in facts:

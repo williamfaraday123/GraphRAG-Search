@@ -13,10 +13,11 @@ import query_pb2
 import query_pb2_grpc
 
 from retriever import HybridRetriever
-from graph_engine import MAX_ITERATIONS, answer_paths, build_query_graph, similarity_paths
+from graph_engine import ANSWER_TOKEN, MAX_ITERATIONS, answer_paths, build_query_graph, similarity_paths
 from corpus import normalize_corpus_id, normalize_file_id
 from corpus_indexer import CorpusIndexer
 from knowledge_graph import KnowledgeGraphBuilder
+from entity_resolution import EntityResolver
 
 # Aliases for readability
 SearchRequest = query_pb2.SearchRequest
@@ -53,7 +54,11 @@ class QueryProcessorServicer:
         self.corpus_indexer = CorpusIndexer(self.retriever.embedding_service)
         # Background LLM extraction of entities/facts from uploads; also resumes any
         # files left unprocessed by a previous run
-        self.kg_builder = KnowledgeGraphBuilder(self.corpus_indexer.neo4j_driver)
+        # Entities naming the same concept are written onto one node (entity_resolution.py)
+        self.entity_resolver = EntityResolver(
+            self.corpus_indexer.neo4j_driver, self.retriever.embedding_service.generate_batch_embeddings
+        )
+        self.kg_builder = KnowledgeGraphBuilder(self.corpus_indexer.neo4j_driver, resolver=self.entity_resolver)
 
     def StartProcessing(self, request, context) -> Iterator[SearchResponse]:
         # Knowledge-graph extraction pauses between chunks while a search is running,
@@ -107,7 +112,15 @@ class QueryProcessorServicer:
             timings = []
             step_started = time.perf_counter()
 
-            for step in self.app_graph.stream(initial_state, stream_mode="updates"):
+            # "custom" carries the answer text as the model writes it, so the UI shows the answer
+            # while it is being written instead of after the whole answer is done
+            streamed = False
+            for mode, step in self.app_graph.stream(initial_state, stream_mode=["updates", "custom"]):
+                if mode == "custom":
+                    if step.get(ANSWER_TOKEN):
+                        streamed = True
+                        yield self._make_chunk(step[ANSWER_TOKEN])
+                    continue
                 for node_name, update in step.items():
                     state_acc.update(update)
                     elapsed = time.perf_counter() - step_started
@@ -133,12 +146,11 @@ class QueryProcessorServicer:
             logger.info("Search step timings: %s", ", ".join(timings))
             answer = state_acc.get("final_answer", "")
 
-            # Stream the answer (simulated streaming of the final text). Each piece is a word
-            # plus the whitespace after it, so line breaks survive and Markdown renders in the UI.
-            for piece in re.findall(r"\s*\S+\s*", answer.strip()):
-                chunk_resp = SearchResponse()
-                chunk_resp.chunk.content = piece
-                yield chunk_resp
+            # Answers not written by the model (e.g. "nothing found") weren't streamed: send them
+            # word by word. Each piece keeps the whitespace after it, so line breaks survive.
+            if not streamed:
+                for piece in re.findall(r"\s*\S+\s*", answer.strip()):
+                    yield self._make_chunk(piece)
 
             # Final Metadata
             final_resp = SearchResponse()
@@ -251,6 +263,8 @@ class QueryProcessorServicer:
         response = query_pb2.DeleteCorpusFileResponse()
         try:
             filename = self.corpus_indexer.delete_file(request.corpus_id, request.file_id)
+            # Some of its entities may be gone; rebuild the resolver's view of the workspace
+            self.entity_resolver.forget(normalize_corpus_id(request.corpus_id))
             response.success = True
             response.message = f"Deleted {filename}"
         except (ValueError, FileNotFoundError) as e:
@@ -285,6 +299,11 @@ class QueryProcessorServicer:
         resp = SearchResponse()
         resp.agent_step.agent = agent
         resp.agent_step.detail = detail
+        return resp
+
+    def _make_chunk(self, text: str):
+        resp = SearchResponse()
+        resp.chunk.content = text
         return resp
 
 def serve():

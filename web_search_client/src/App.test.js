@@ -80,15 +80,34 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it; Map/Preview scroll to what they open
 });
 
-test('switches between wiki and uploaded-file search modes', async () => {
+test('opens in My files mode, listed first, and switches to the wiki', async () => {
   global.fetch = jest.fn(() => json([]));
   render(<App />);
 
-  expect(screen.getByRole('button', { name: 'Wiki dump' })).toHaveAttribute('aria-pressed', 'true');
-  fireEvent.click(screen.getByRole('button', { name: 'My files' }));
-  expect(screen.getByText('Ask questions about your files')).toBeInTheDocument();
+  const modes = within(screen.getByRole('group', { name: 'Search mode' })).getAllByRole('button');
+  expect(modes.map((b) => b.textContent)).toEqual(['My files', 'Wiki dump']);
   expect(screen.getByRole('button', { name: 'My files' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByText('Ask questions about your files')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Wiki dump' }));
+  expect(screen.getByRole('button', { name: 'Wiki dump' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.queryByText('Ask questions about your files')).not.toBeInTheDocument();
   await act(async () => { await Promise.resolve(); });
+});
+
+test('a first visit creates an upload workspace on load, once', async () => {
+  window.localStorage.removeItem('graphrag-corpus-id');
+  const created = '00000000-0000-4000-8000-000000000099';
+  global.fetch = jest.fn((url, options = {}) => {
+    if (url.endsWith('/api/v1/corpora') && options.method === 'POST') return json({ corpusId: created });
+    return json([]);
+  });
+  render(<App />);
+
+  await waitFor(() => expect(window.localStorage.getItem('graphrag-corpus-id')).toBe(created));
+  const posts = global.fetch.mock.calls.filter(([url, o]) => url.endsWith('/api/v1/corpora') && o?.method === 'POST');
+  expect(posts).toHaveLength(1);
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining(`/corpora/${created}/files`)));
 });
 
 test('checked files scope the query; none checked searches all files', async () => {
@@ -433,6 +452,15 @@ test('shows the answer as formatted Markdown, answer first, with the checks coll
   expect(checks.open).toBe(false);
   expect(within(checks).getByText('How the answer was checked')).toBeInTheDocument();
   expect(checks.querySelectorAll('li')).toHaveLength(2);
+});
+
+test('scrolls to the answer once it is complete', async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = jest.fn(function scroll() { scrolled.push(this); });
+  await openMyFiles();
+  await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: 's3://rag/x.txt',
+    milvusScore: 1, pagerankScore: 1, hybridScore: 1 }]);
+  await waitFor(() => expect(scrolled.at(-1)).toHaveClass('answer-section'));
 });
 
 test('Map and Preview scroll to what they open; Map scrolls back to an open map', async () => {

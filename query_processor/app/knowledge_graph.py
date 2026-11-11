@@ -304,8 +304,11 @@ def _close_now(connection):
             pass
 
 class KnowledgeGraphBuilder:
-    def __init__(self, neo4j_driver):
+    def __init__(self, neo4j_driver, resolver=None):
+        """resolver: entity_resolution.EntityResolver; entities that name the same concept as
+        an existing one are written onto that entity instead of a new node."""
         self.driver = neo4j_driver
+        self.resolver = resolver
         self.enabled = os.getenv("KG_ENABLED", "true").lower() not in {"0", "false", "no"}
         self._queue = queue.Queue()
         self._queued = set()
@@ -420,7 +423,21 @@ class KnowledgeGraphBuilder:
         except Exception:
             logger.exception("Could not create the Entity index")
 
+    def _merge_existing(self):
+        """Folds duplicates stored before entity resolution existed (or since a file delete
+        left a stale cache); a no-op once a workspace is clean."""
+        try:
+            with self.driver.session() as session:
+                corpora = [r["c"] for r in session.run(
+                    "MATCH (e:Entity) RETURN DISTINCT e.corpus_id AS c").data()]
+            for corpus_id in corpora:
+                self.resolver.merge_existing(corpus_id)
+        except Exception:
+            logger.exception("Merging duplicate entities failed")
+
     def _run(self):
+        if self.resolver is not None:
+            self._merge_existing()
         while True:
             corpus_id, file_id = self._queue.get()
             with self._queued_lock:
@@ -465,6 +482,7 @@ class KnowledgeGraphBuilder:
                 logger.warning("Extraction failed for chunk %s: %s", chunk["chunk_id"], exc)
                 self._mark(chunk["chunk_id"], "failed")
                 continue
+            entities, facts = self._resolve(corpus_id, entities, facts)
             self._write(chunk["chunk_id"], entities, facts)
             total_facts += len(facts)
         logger.info(
@@ -478,8 +496,34 @@ class KnowledgeGraphBuilder:
                 chunk_id=chunk_id, status=status,
             ).consume()
 
+    def _resolve(self, corpus_id, entities, facts):
+        """Rewrites entity keys to their canonical entity (entity_resolution.py). An entity
+        written onto another carries its own name as an alias; facts that become self-loops
+        (both ends one concept) are dropped."""
+        if self.resolver is None or not entities:
+            return entities, facts
+        try:
+            mapping = self.resolver.resolve(corpus_id, entities)
+        except Exception:
+            logger.exception("Entity resolution failed; writing entities unmerged")
+            return entities, facts
+        merged = {}
+        for e in entities:
+            key = mapping.get(e["key"], e["key"])
+            entry = merged.setdefault(key, {"key": key, "name": e["name"], "kind": e["kind"], "aliases": []})
+            if key != e["key"]:
+                entry["aliases"].append(e["name"])
+        out_facts = []
+        for f in facts:
+            a, b = mapping.get(f["source"], f["source"]), mapping.get(f["target"], f["target"])
+            if a != b:
+                out_facts.append({**f, "source": a, "target": b})
+        return list(merged.values()), out_facts
+
     def _write(self, chunk_id, entities, facts):
         # Starts from MATCH on the chunk, so nothing is written if the file was deleted meanwhile
+        for ent in entities:
+            ent.setdefault("aliases", [])
         with self.driver.session() as session:
             session.execute_write(lambda tx: tx.run(
                 """
@@ -489,6 +533,8 @@ class KnowledgeGraphBuilder:
                 UNWIND $entities AS ent
                 MERGE (e:Entity {corpus_id: c.corpus_id, key: ent.key})
                   ON CREATE SET e.name = ent.name, e.kind = ent.kind
+                WITH c, e, [a IN ent.aliases WHERE a <> e.name AND NOT a IN coalesce(e.aliases, [])] AS extra
+                SET e.aliases = CASE WHEN size(extra) = 0 THEN e.aliases ELSE coalesce(e.aliases, []) + extra END
                 MERGE (c)-[:MENTIONS]->(e)
                 WITH DISTINCT c
                 UNWIND $facts AS f
