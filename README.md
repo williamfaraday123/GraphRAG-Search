@@ -1,7 +1,13 @@
-# Final Year Project: Reimagine-Google-Pagerank-Search-for-Generative-Information-Retrieval
+# Final Year Project: Reimagine Google PageRank Search for Generative Information Retrieval
 
-This project aims to develop an AI-powered search engine for Internet by leveraging Large Language Models (LLMs) like Perplexity AI and SearchGPT. The system will search and analyze online resources from databases such as the current Internet, providing intelligent retrieval, evaluation, and recommendation of relevant applications. By integrating AI-driven chatbot capabilities with traditional search engine algorithms, it will lead to next-generation search engine for information retrieval in the Internet.
-This project uses python 3.12
+GraphRAG-Search combines graph-aware authority ranking with LLM answer synthesis. Instead of ranking hyperlinked web pages, it ranks chunks of unstructured text over a graph built automatically from the documents, then has an LLM agent write an answer from the best evidence and stream it to the browser.
+
+It has two modes:
+
+- **Wiki dump**: a fixed corpus built offline by the [ingestion pipeline](ingestion_pipeline/README.md). An LLM labels relations between chunks, and authority is PageRank over the subgraph retrieved for each query.
+- **My files**: upload workspaces. Users upload `.txt`, `.md`, `.pdf`, `.docx` or `.mp3` files, and the query processor indexes them and builds a knowledge graph of entities and facts. Authority is local push Personalized PageRank over the whole workspace graph.
+
+This project uses Python 3.12.
 
 <img width="4111" height="1270" alt="image" src="https://github.com/user-attachments/assets/791b172b-8a35-4b39-8470-c47d323bee05" />
 
@@ -11,25 +17,52 @@ This project uses python 3.12
 
 ```
 React UI (port 3000)
-    │  HTTP POST /api/v1/search {prompt}
+    │  HTTP POST /api/v1/search {prompt, topK, corpusId, fileIds}
     ▼
-Spring Boot (port 8080) ← this service
-    │  gRPC StartProcessing(prompt)
+Spring Boot orchestration layer (port 8080)
+    │  gRPC StartProcessing (server streaming)
     ▼
 Python Query Processor (port 50051)
-    │  → Milvus (Vector DB)
-    │  → Neo4j (Knowledge Graph)
-    │  → LangGraph Pregel Engine
+    │  → Milvus (vectors), Neo4j (graph), MinIO (source files)
+    │  → LangGraph agent: planner → retrieval → analyst → synthesizer
     ▼
-Streams back: STATUS → CHUNK → DONE (SSE)
+Streams back as SSE: status / agent_step / chunk → done (or error)
 ```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
+
+### How a query is answered
+
+1. **Plan**: the planner searches the question as written, or splits it into up to 3 subqueries.
+2. **Retrieve**: the question is embedded (all-MiniLM-L6-v2, 384 dimensions) and searched in Milvus, then expanded through the graph:
+   - Wiki: the Neo4j subgraph around the vector hits.
+   - Uploads: knowledge-graph fact paths starting from the entities the question names, plus local push Personalized PageRank. Seeds are the named entities and the vector hits, and Neo4j neighbours are fetched only as the push reaches them. If PPR fails, retrieval falls back to the subgraph.
+3. **Rank**: each score is divided by the highest score among the candidates, then combined:
+   - Default: `0.6 × semantic + 0.4 × authority`
+   - Uploads, when fact paths are found: `0.5 × semantic + 0.2 × authority + 0.3 × fact-path relevance`
+4. **Refine**: the analyst checks the evidence for gaps and can start up to 2 more retrieval rounds. In upload workspaces whose question names known entities, a graph coverage check replaces the model call. The context is enough once every named entity appears in some retrieved chunk. Otherwise the next round searches the strongest fact of up to 3 missing entities.
+5. **Synthesize**: the answer model writes the answer from the top evidence, streamed word by word.
+
+### Upload workspace features
+
+- **Knowledge graph**: after a file is indexed, a local model extracts entities and facts in the background, stored as `(:Chunk)-[:MENTIONS]->(:Entity)` and `(:Entity)-[:FACT]->(:Entity)`.
+- **Entity resolution**: entities that name the same concept are merged into one node. Merges cover the same wording once normalised, or a close meaning with the same main noun. The other names are kept as aliases.
+- **File similarity**: questions such as "which files are most similar?" are answered by comparing the files' graphs, with file-level embedding similarity as a second check.
+- **Corpus map**: a knowledge graph view of the workspace. Click an entity to see its relations. A second tab groups chunks into themed clusters by embedding similarity.
+- **Evidence and reasoning paths**: the answer shows the evidence chunks it used and the fact paths the graph followed. Hovering over an evidence chunk highlights it in the corpus map.
 
 ## Prerequisites
 
-- **Java 25+** — verify: `java -version`
-- **Maven** — verify: `mvn --version`
-- **Docker Desktop** — running with containers: `milvus-standalone`, `etcd`, `neo4j`, `minio`
-- **Python Query Processor** — running on `localhost:50051`
+- **Java 21+**: verify with `java -version`
+- **Maven**, or use the bundled `mvnw`
+- **Python 3.12**
+- **Node.js and npm**, for the React UI
+- **Docker Desktop**, running `milvus-standalone`, `etcd`, `neo4j` and `minio`
+- **An OpenAI-compatible LLM server**, by default Ollama at `http://localhost:11434/v1`. Pull the models you configure (see [Configuration](#configuration)), for example:
+  ```
+  ollama pull qwen2.5:1.5b
+  ollama pull qwen3:4b-instruct
+  ```
 
 ## Quick Start (instructions to run locally)
 
@@ -45,19 +78,24 @@ Verify they're up:
 docker compose ps
 ```
 
-[run ingestion_pipeline](ingestion_pipeline/README.md)
+### 2. Build the wiki corpus
+
+[ingestion_pipeline](ingestion_pipeline/README.md)
 
 ```
 cd ingestion_pipeline
 python -m venv venv
 venv\Scripts\activate.bat
 pip install -r requirements.txt
-python upload_to_minio.py # upload all .txt files from the raw_data folder into MinIO's rag-datasets bucket
-python main.py
-python index_to_milvus.py  # embed the Neo4j chunks into Milvus; search finds nothing without this
+python upload_to_minio.py   # upload all .txt files from raw_data into MinIO's rag-datasets bucket
+python main.py              # chunk, extract relations with the LLM, write the graph to Neo4j
+python index_to_milvus.py   # embed the Neo4j chunks into Milvus; wiki search finds nothing without this
 ```
 
-### 2. Start the Python Query Processor
+Skip this step if you only want to use upload workspaces.
+
+### 3. Start the Python Query Processor
+
 [query_processor](query_processor/README.md)
 
 ```
@@ -73,11 +111,11 @@ cd proto
 python -m grpc_tools.protoc -I. --python_out=../app --grpc_python_out=../app query.proto
 cd ..
 ```
-This creates two files in app/:
-- app/query_pb2.py — the message classes
-- app/query_pb2_grpc.py — the server/client stubs
+This creates two files in `app/`:
+- `app/query_pb2.py`: the message classes
+- `app/query_pb2_grpc.py`: the server/client stubs
 
-run main.py:
+Run the server:
 ```
 cd app
 python main.py
@@ -85,7 +123,8 @@ python main.py
 
 Leave this terminal running.
 
-### 3. Generate proto stubs & run Spring Boot
+### 4. Run Spring Boot
+
 [orchestration_layer](orchestration_layer/README.md)
 
 In a **new terminal**:
@@ -96,29 +135,41 @@ mvnw compile -DskipTests
 mvnw spring-boot:run
 ```
 
-### 4. (Optional) Start the React UI
+Compiling also generates the Java gRPC stubs from `src/main/proto/query.proto`.
+
+### 5. (Optional) Start the React UI
+
 [web_search_client](web_search_client/README.md)
 
 ```powershell
 cd web_search_client
+npm install
 npm start
 ```
 
-Then open `http://localhost:3000`.
+Then open `http://localhost:3000`. Spring Boot also serves the last React build that was copied into its `static/` folder at `http://localhost:8080`.
 
 ## API Endpoints
 
+All paths are served by the orchestration layer on port 8080.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/search` | Submit a search query. Body: `{"prompt": "...", "topK": 5, "corpusId": "wiki"}`. Returns SSE stream. |
+| `POST` | `/api/v1/search` | Submit a search query. Body: `{"prompt": "...", "topK": 5, "corpusId": "wiki", "fileIds": []}`. `corpusId` defaults to `wiki`. `fileIds` optionally limits an upload-workspace search to those files. Returns an SSE stream. |
+| `GET` | `/api/v1/chunk-source?uri=s3://...` | Full text of a source document, fetched through the query processor so the browser never talks to MinIO. |
 | `POST` | `/api/v1/corpora` | Create an isolated upload workspace. Returns a UUID `corpusId`. |
-| `POST` | `/api/v1/corpora/{corpusId}/files` | Upload and index one or more `.txt`/`.md` files using multipart field `files` (up to 5 MB each, at most 5 per request). |
+| `POST` | `/api/v1/corpora/{corpusId}/files` | Upload and index `.txt`, `.md`, `.pdf`, `.docx` or `.mp3` files using multipart field `files` (up to 5 MB each, 1–5 files per request). Returns one result per file. |
 | `GET` | `/api/v1/corpora/{corpusId}/files` | List files indexed in that workspace. |
-| `GET`  | `/api/v1/health` | Health check. Returns `{"status": "UP"}` |
+| `GET` | `/api/v1/corpora/{corpusId}/files/{fileId}` | Full text of one uploaded file, for the preview panel. |
+| `DELETE` | `/api/v1/corpora/{corpusId}/files/{fileId}` | Remove one file from object storage, the graph and the vector index. |
+| `GET` | `/api/v1/corpora/{corpusId}/map?fileIds=a,b` | Corpus map: entities, relationships and chunk clusters. `fileIds` is optional. |
+| `GET` | `/api/v1/health` | Health check. Returns `{"status": "UP", "service": "orchestration-layer"}`. |
 
-The React UI offers **Wiki dump** and **My files** modes. File uploads are indexed synchronously; once the upload request succeeds, questions in My files mode retrieve only from that workspace. Workspaces are stored in browser local storage and use UUIDs as bearer-like identifiers; add authentication and ownership checks before exposing this API to untrusted users.
+The React UI offers **Wiki dump** and **My files** modes. In My files mode, each indexed file has a checkbox, so selected files can be previewed, deleted or chosen as the only files a question searches.
 
-Uploads currently accept UTF-8 `.txt` and `.md` files only. Each workspace gets its own Milvus collection, while Neo4j chunk nodes are tagged with the workspace ID. Wiki requests continue to use the existing `ai_docs` collection.
+Uploads are chunked, embedded and indexed before the upload request returns, so vector search works right away. Knowledge-graph extraction is queued and runs in the background, and it pauses while a search is running. Graph features (fact paths, local PPR over entities, the coverage check, the corpus map's fact edges) appear as extraction progresses. Until facts exist, the corpus map links entities that appear in the same sentence.
+
+Each workspace gets its own Milvus collection, and its Neo4j nodes are tagged with the workspace ID, so one workspace's search never returns another's chunks. Wiki requests use the `ai_docs` collection. Workspace IDs are kept in browser local storage and act like bearer tokens: add authentication and ownership checks before exposing this API to untrusted users.
 
 ## SSE Event Types
 
@@ -126,117 +177,122 @@ The `/api/v1/search` endpoint returns a `text/event-stream` with these event nam
 
 | Event | Data Fields | Description |
 |-------|-------------|-------------|
-| `status` | `{stage, message}` | Pipeline stage: `RETRIEVING` → `ITERATING` → `SYNTHESIZING` |
-| `chunk` | `{content, sourceId}` | Streaming word-by-word answer tokens |
-| `done` | `{answer, sources[], confidence}` | Final answer with citation sources |
-| `error` | `{message}` | Error information |
+| `status` | `{stage, message}` | Pipeline stage: `PLANNING` → `RETRIEVING` → `ANALYZING` → (`RETRIEVING` again for each extra round) → `SYNTHESIZING` |
+| `agent_step` | `{agent, detail}` | What each agent node decided, for the agent trace |
+| `chunk` | `{content, sourceId}` | Answer text, streamed as the model writes it |
+| `done` | `{answer, sources[], confidence, chunks[], graphPaths[], graphSeeds[]}` | Final answer, its evidence chunks, and the knowledge-graph fact paths behind it with the entities the walk started from |
+| `error` | `{message}` | Error information, including a message when the stream times out |
 
 ## Configuration
 
-Set these in `.env` or environment variables:
+Set these as environment variables. Docker Compose reads them from `.env` in the project root.
+
+**Orchestration layer (Spring Boot)**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SERVER_PORT` | `8080` | Spring Boot port |
-| `GRPC_CLIENT_HOST` | `localhost` | Query Processor host |
-| `GRPC_CLIENT_PORT` | `50051` | Query Processor gRPC port |
+| `GRPC_CLIENT_HOST` | `localhost` | Query processor host |
+| `GRPC_CLIENT_PORT` | `50051` | Query processor gRPC port |
+| `SEARCH_SSE_TIMEOUT_MS` | `900000` | How long a search stream stays open before the UI is told it timed out |
+
+**Query processor and ingestion pipeline**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EDGE_MODEL_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible LLM endpoint |
+| `LLM_API_KEY` | `ollama` | API key for that endpoint |
+| `EDGE_MODEL` | `qwen3:4b-instruct` (query processor), `qwen2.5:1.5b` (ingestion) | Planner and analyst model; relation labelling in the ingestion pipeline |
+| `ANSWER_MODEL` | `qwen3:4b-instruct` | Model that writes the final answer |
+| `LLM_TIMEOUT_SECONDS` | `600` | LLM request timeout |
+| `KG_ENABLED` | `true` | Extract a knowledge graph from uploads |
+| `KG_MODEL` | `qwen2.5:1.5b` | Ollama model for knowledge-graph extraction |
+| `KG_OLLAMA_URL` | `EDGE_MODEL_BASE_URL` without `/v1` | Ollama URL for extraction |
+| `KG_SEARCH_ENABLED` | `true` | Use knowledge-graph fact paths in upload searches |
+| `WHISPER_MODEL` | `base` | Speech-to-text model for `.mp3` uploads (`tiny`, `base`, `small`, `medium`, `large-v3`) |
+| `WHISPER_DEVICE` / `WHISPER_COMPUTE_TYPE` | `cpu` / `int8` | Whisper runtime settings |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1500` / `200` | Chunking settings |
+| `MILVUS_HOST` / `MILVUS_PORT` | `localhost` / `19530` | Milvus connection |
+| `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` | `bolt://localhost:7687` / `neo4j` / `password123` | Neo4j connection |
+| `MINIO_ENDPOINT` / `MINIO_BUCKET` | `http://localhost:9000` / `rag-datasets` | MinIO connection |
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `minioadmin` / `minioadmin` | MinIO credentials |
+
+In Docker, `.env` keeps host-side values (`localhost`). The containers reach a host Ollama through `DOCKER_EDGE_MODEL_BASE_URL`, which defaults to `http://host.docker.internal:11434/v1`.
 
 ## Troubleshooting
 
-- **`Connection refused: localhost:50051`** → The Python Query Processor isn't running. Start it first.
-- **`Fail connecting to Milvus`** → Run `docker compose up milvus-standalone -d` and wait 10 seconds.
-- **Proto compilation errors** → Ensure `src/main/proto/query.proto` exists (it mirrors `query_processor/proto/query.proto`).
+- **`Connection refused: localhost:50051`**: the Python query processor isn't running. Start it first.
+- **`Fail connecting to Milvus`**: run `docker compose up milvus-standalone -d` and wait 10 seconds.
+- **Proto compilation errors**: make sure `orchestration_layer/src/main/proto/query.proto` exists and matches `query_processor/proto/query.proto`.
+- **Search times out or is very slow**: the LLMs are probably running on CPU. Use smaller models, ask shorter questions, or raise `SEARCH_SSE_TIMEOUT_MS`.
+- **No graph features in a new workspace**: knowledge-graph extraction is still running in the background (roughly 4 s per sentence on CPU).
 
-## How to run in docker
+## How to run in Docker
 
-### Build React locally
+[docker-compose.yml](docker-compose.yml) builds every image from the `Dockerfile.render` variants. These install Python packages straight from PyPI, and the orchestration image compiles the JAR itself.
+
+### 1. Refresh the React build (only when the UI has changed)
+
+The orchestration image serves whatever is in `orchestration_layer/src/main/resources/static/`, so copy a fresh React build there first:
+
 ```powershell
 cd web_search_client
 npm install
 npm run build        # creates web_search_client/build/
-
 cd ..
-```
-### Build the fat JAR locally (includes proto stubs & React UI)
-```powershell
-# First, copy the React build into Spring Boot's static resources
 Copy-Item -Recurse web_search_client\build\* orchestration_layer\src\main\resources\static\ -Force
+```
 
-# Then package everything into a single JAR
+### 2. Build and start everything
+
+```powershell
+docker compose build
+docker compose up -d
+```
+
+In China, override the package index with the Tsinghua mirror:
+```powershell
+docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+### 3. Monitor and verify
+
+```powershell
+docker compose logs -f ingestion_pipeline
+docker compose logs -f query_processor
+docker compose logs -f orchestration_layer
+docker compose ps
+
+# If you see Created instead of Up, start them:
+docker compose start
+```
+
+The ingestion pipeline is a one-shot job: it builds the wiki corpus and exits.
+
+### Building a fat JAR locally (optional)
+
+```powershell
 cd orchestration_layer
 mvnw clean package -DskipTests
 ```
-If error occurs due to stale .class files in target/
+
+If the build fails because of stale `.class` files in `target/`:
 ```powershell
-# Clean the stale files and rebuild
 rm src\main\java\com\com -Recurse -Force
 mvnw clean package -DskipTests
 ```
 
-### 1. Build all images
+### Offline Python builds (optional)
+
+The plain `Dockerfile`s in `ingestion_pipeline/` and `query_processor/` install from a pre-downloaded `wheel_cache/` instead of PyPI, for machines whose Docker builds can't reach the internet. `docker compose` doesn't use them. To build them yourself:
+
 ```powershell
-docker compose build
+cd ingestion_pipeline && venv\Scripts\activate
+Remove-Item -Recurse -Force wheel_cache -ErrorAction SilentlyContinue
+pip download "torch==2.6.0+cpu" -d wheel_cache --platform linux_x86_64 --only-binary=:all: --python-version 312 --index-url https://download.pytorch.org/whl/cpu
+pip download -r requirements.txt -d wheel_cache --platform manylinux2014_x86_64 --only-binary=:all: --python-version 312 --extra-index-url https://download.pytorch.org/whl/cpu
+docker build -t graphrag-ingestion .
+cd ..\query_processor
+# repeat the same two pip download commands, then:
+docker build -t graphrag-query-processor .
 ```
-
-### 2. Start everything
-```powershell
-docker compose up -d
-```
-
-## Full Docker deployment (when Docker can pull images)
-
-
-1. **Build everything locally:**
-   ```powershell
-   cd web_search_client && npm install && npm run build
-   Copy-Item -Recurse web_search_client\build\* orchestration_layer\src\main\resources\static\ -Force
-   cd orchestration_layer && mvnw clean package -DskipTests
-   cd ..
-
-   # On your machine, pre-download Linux wheels for each Python image.
-   # The Dockerfiles copy wheel_cache/ and install from it offline.
-   cd ingestion_pipeline && venv\Scripts\activate
-   Remove-Item -Recurse -Force wheel_cache -ErrorAction SilentlyContinue
-
-   # 1. Download a Linux CPU torch wheel for the Docker image
-   pip download "torch==2.6.0+cpu" -d wheel_cache --platform linux_x86_64 --only-binary=:all: --python-version 312 --index-url https://download.pytorch.org/whl/cpu
-
-   # 2. Download everything else as Linux wheels
-   pip download -r requirements.txt -d wheel_cache --platform manylinux2014_x86_64 --only-binary=:all: --python-version 312 --extra-index-url https://download.pytorch.org/whl/cpu
-
-   cd ..\query_processor
-   Remove-Item -Recurse -Force wheel_cache -ErrorAction SilentlyContinue
-   pip download "torch==2.6.0+cpu" -d wheel_cache --platform linux_x86_64 --only-binary=:all: --python-version 312 --index-url https://download.pytorch.org/whl/cpu
-   pip download -r requirements.txt -d wheel_cache --platform manylinux2014_x86_64 --only-binary=:all: --python-version 312 --extra-index-url https://download.pytorch.org/whl/cpu
-
-   cd ..
-
-   # Check both Docker build contexts include their offline wheel folders
-   dir ingestion_pipeline\wheel_cache
-   dir query_processor\wheel_cache
-
-   docker compose build ingestion_pipeline query_processor
-   ```
-
-2. **Build and run all Docker services:**
-   ```powershell
-   docker compose build && docker compose up -d
-   ```
-
-   ```powershell
-   # In China (override with Tsinghua mirror)
-   docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-   ```
-
-3. **Monitor and verify:**
-   ```powershell
-   docker compose logs -f ingestion_pipeline
-   docker compose logs -f query_processor
-    docker compose logs -f orchestration_layer
-   docker compose ps
-
-   # If you see Created instead of Up, start them:
-   docker compose start
-
-   
-   ```

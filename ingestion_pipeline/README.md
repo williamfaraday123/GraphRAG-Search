@@ -66,7 +66,7 @@ docker compose ps neo4j
 
 Install ollama
 ```
-ollama pull deepseek-r1:1.5b
+ollama pull qwen3:4b-instruct
 ```
 Go to Settings, toggle on 'Expose ollama to network'
 
