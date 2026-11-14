@@ -4,7 +4,7 @@ GraphRAG-Search combines graph-aware authority ranking with LLM answer synthesis
 
 It has two modes:
 
-- **Wiki dump**: a fixed corpus built offline by the [ingestion pipeline](ingestion_pipeline/README.md). An LLM labels relations between chunks, and authority is PageRank over the subgraph retrieved for each query.
+- **Wiki dump**: a fixed corpus built offline by the [ingestion pipeline](ingestion_pipeline/README.md). An LLM labels relations between chunks, and authority is local push Personalized PageRank over those relations.
 - **My files**: upload workspaces. Users upload `.txt`, `.md`, `.pdf`, `.docx` or `.mp3` files, and the query processor indexes them and builds a knowledge graph of entities and facts. Authority is local push Personalized PageRank over the whole workspace graph.
 
 This project uses Python 3.12.
@@ -34,9 +34,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 ### How a query is answered
 
 1. **Plan**: the planner searches the question as written, or splits it into up to 3 subqueries.
-2. **Retrieve**: the question is embedded (all-MiniLM-L6-v2, 384 dimensions) and searched in Milvus, then expanded through the graph:
-   - Wiki: the Neo4j subgraph around the vector hits.
-   - Uploads: knowledge-graph fact paths starting from the entities the question names, plus local push Personalized PageRank. Seeds are the named entities and the vector hits, and Neo4j neighbours are fetched only as the push reaches them. If PPR fails, retrieval falls back to the subgraph.
+2. **Retrieve**: the question is embedded (all-MiniLM-L6-v2, 384 dimensions) and searched in Milvus, then expanded through the graph with local push Personalized PageRank, which also gives each chunk its authority score. Neo4j neighbours are fetched only as the push reaches them, so the cost doesn't grow with corpus size. Both modes use the same function ([local_ppr.py](query_processor/app/local_ppr.py)):
+   - Wiki: seeds are the vector hits. The walk follows the chunk relations from ingestion, weighted by the LLM's confidence.
+   - Uploads: seeds are the entities the question names plus the vector hits. The walk follows `NEXT_CHUNK`, `MENTIONS` and `FACT` edges, and knowledge-graph fact paths from the named entities add more chunks.
+   - If PPR fails, retrieval falls back to PageRank over the subgraph of the retrieved chunks.
 3. **Rank**: each score is divided by the highest score among the candidates, then combined:
    - Default: `0.6 × semantic + 0.4 × authority`
    - Uploads, when fact paths are found: `0.5 × semantic + 0.2 × authority + 0.3 × fact-path relevance`
@@ -269,6 +270,63 @@ docker compose start
 
 The ingestion pipeline is a one-shot job: it builds the wiki corpus and exits.
 
+## Publish to Docker Hub and run on another device
+
+Only the three app images are published. The wiki data is baked into the ingestion image, and the React build into the orchestration image. Milvus, Neo4j, MinIO and etcd come from their public images.
+
+### On this machine: build and push
+
+1. Add your Docker Hub username to `.env` (see [.env.example](.env.example)):
+   ```
+   DOCKERHUB_USER=your-dockerhub-username
+   TAG=latest
+   ```
+2. If the UI has changed, refresh the React build first (see [step 1 above](#1-refresh-the-react-build-only-when-the-ui-has-changed)).
+3. Log in, build and push:
+   ```powershell
+   docker login
+   docker compose build ingestion_pipeline query_processor orchestration_layer
+   docker compose push ingestion_pipeline query_processor orchestration_layer
+   ```
+
+These images are `linux/amd64`, which runs on Windows, Linux and Intel Macs. For Apple Silicon or other ARM machines, push multi-platform images with buildx instead of step 3 (slower, because ARM is emulated):
+```powershell
+docker buildx create --use --name multi
+$u = "your-dockerhub-username"
+docker buildx build --platform linux/amd64,linux/arm64 -f ingestion_pipeline/Dockerfile.render -t "$u/graphrag-ingestion:latest" --push ingestion_pipeline
+docker buildx build --platform linux/amd64,linux/arm64 -f query_processor/Dockerfile.render -t "$u/graphrag-query-processor:latest" --push query_processor
+docker buildx build --platform linux/amd64,linux/arm64 -f orchestration_layer/Dockerfile.render -t "$u/graphrag-orchestration:latest" --push orchestration_layer
+```
+
+Docker Hub repositories are public by default. If you make them private, the other device must `docker login` before pulling.
+
+### On the other device: pull and run
+
+The other device needs only Docker and two files in one folder. Nothing else is installed, not even Ollama:
+- [docker-compose.hub.yml](docker-compose.hub.yml), renamed to `docker-compose.yml`
+- `.env`, copied from [.env.example](.env.example), with the same `DOCKERHUB_USER` and `TAG`
+
+Then start everything:
+```
+docker compose up -d
+```
+
+Open `http://localhost:8080`; Spring Boot serves the UI.
+
+What happens on first start:
+1. The `ollama` container starts, and the one-shot `ollama-pull` container downloads the three models named in `.env` (`EDGE_MODEL`, `ANSWER_MODEL`, `KG_MODEL`). This is a few GB, so it takes a while. Follow it with `docker compose logs -f ollama-pull`. The models stay in the `ollama_data` volume, so later starts skip the download.
+2. The query processor and ingestion job wait for the download to finish, then start.
+3. The ingestion container builds the wiki corpus, which takes a while because it calls the LLM. Follow it with `docker compose logs -f ingestion_pipeline`. Upload workspaces work as soon as the query processor is up.
+
+The embedding and Whisper models also download on first use, so the device needs internet access the first time.
+
+By default the models run on the CPU inside the container. To speed them up:
+- **NVIDIA GPU** (Linux, or Windows with WSL2 and the NVIDIA Container Toolkit): uncomment the `deploy:` block under the `ollama` service.
+- **Mac**: Docker on macOS can't use the Apple GPU. For GPU speed, install the Ollama app on the Mac and set `DOCKER_EDGE_MODEL_BASE_URL=http://host.docker.internal:11434/v1` in `.env`. The models are then downloaded into the container's Ollama, but the app uses the host's Ollama, so pull them there too.
+- **Another OpenAI-compatible server**: set `DOCKER_EDGE_MODEL_BASE_URL` and `LLM_API_KEY`. If its model names aren't on the Ollama registry, `ollama-pull` fails and the app containers won't start. In that case, remove `ollama-pull` from their `depends_on`.
+
+To update the other device after pushing new images: `docker compose pull && docker compose up -d`.
+
 ### Building a fat JAR locally (optional)
 
 ```powershell
@@ -296,3 +354,18 @@ cd ..\query_processor
 # repeat the same two pip download commands, then:
 docker build -t graphrag-query-processor .
 ```
+
+
+To publish, on this machine:
+
+Add DOCKERHUB_USER=<your username> to .env.
+Run:
+
+docker login
+docker compose build ingestion_pipeline query_processor orchestration_layer
+docker compose push ingestion_pipeline query_processor orchestration_layer
+To run, on the other device:
+
+Put docker-compose.hub.yml (renamed to docker-compose.yml) and a .env with the same DOCKERHUB_USER in one folder.
+Run docker compose up -d.
+Open http://localhost:8080.

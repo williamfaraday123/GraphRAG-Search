@@ -1,10 +1,13 @@
 """
-Local push Personalized PageRank (PPR) over an upload workspace's graph in Neo4j.
+Local push Personalized PageRank (PPR) over a corpus's graph in Neo4j (the wiki corpus or
+an upload workspace).
 
-The graph: chunks and entities as nodes; edges are chunk -NEXT_CHUNK- chunk (document
-order), chunk -MENTIONS- entity, and entity -FACT- entity (weighted by how many facts link
-the pair). PPR scores how strongly each chunk is connected to the start nodes (the entities
-the question names and the chunks vector search found), at any distance.
+The graph: chunks and entities as nodes; edges are chunk -RELATION- chunk (NEXT_CHUNK in
+document order, plus the LLM-labelled relations the wiki ingestion pipeline writes, weighted
+by their confidence), chunk -MENTIONS- entity, and entity -FACT- entity (weighted by how many
+facts link the pair). The wiki corpus has no entities, so its walk stays on chunk relations.
+PPR scores how strongly each chunk is connected to the start nodes (the entities the question
+names and the chunks vector search found), at any distance.
 
 "Push" (Andersen, Chung & Lang, 2006) computes it locally: each start node holds some
 probability mass; a node keeps a RESTART share of what it holds and passes the rest to its
@@ -45,7 +48,9 @@ class LocalPPR:
             logger.exception("Could not create the Chunk id index")
 
     def _fetch(self, nodes, corpus_id, file_ids):
-        """Weighted neighbour lists for the given nodes, limited to the selected files."""
+        """Weighted neighbour lists for the given nodes, limited to the selected files.
+        Edges never cross corpora (wiki chunk ids are content hashes, upload ids are
+        '<file_id>:<index>'), so chunk neighbours need no corpus filter."""
         params = {"corpus_id": corpus_id, "file_ids": file_ids or [], "all": not file_ids}
         chunk_ids = [n[1] for n in nodes if n[0] == "c"]
         keys = [n[1] for n in nodes if n[0] == "e"]
@@ -57,14 +62,15 @@ class LocalPPR:
                     UNWIND $ids AS cid
                     MATCH (c:Chunk {chunk_id: cid})
                     RETURN cid AS id,
-                           [(c)-[:RELATION]-(n:Chunk) WHERE $all OR n.file_id IN $file_ids | n.chunk_id] AS chunks,
+                           [(c)-[r:RELATION]-(n:Chunk) WHERE $all OR n.file_id IN $file_ids
+                               | [n.chunk_id, coalesce(r.weight, 1.0)]] AS chunks,
                            [(c)-[:MENTIONS]->(e:Entity) | e.key] AS entities
                     """,
                     ids=chunk_ids, **params,
                 ):
                     out = adjacency[chunk_node(row["id"])]
-                    for cid in row["chunks"]:
-                        out[chunk_node(cid)] += 1.0
+                    for cid, weight in row["chunks"]:
+                        out[chunk_node(cid)] += float(weight)
                     for key in row["entities"]:
                         out[entity_node(key)] += 1.0
             if keys:

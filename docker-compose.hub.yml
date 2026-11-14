@@ -1,0 +1,241 @@
+# ============================================
+# GraphRAG-Search: run from Docker Hub images
+#
+# Needs only this file and a .env next to it (copy .env.example), no source code.
+# On another device, rename this file to docker-compose.yml, or pass it with -f:
+#   docker compose -f docker-compose.hub.yml up -d
+# Everything runs in containers, including the LLM (Ollama); the models in .env are pulled
+# automatically on first start. Then open http://localhost:8080
+# ============================================
+
+services:
+  # ============================================
+  # Infrastructure Layer
+  # ============================================
+
+  milvus-standalone:
+    image: milvusdb/milvus:v2.5.9
+    container_name: milvus-standalone
+    command: ["milvus", "run", "standalone"]
+    environment:
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+    depends_on:
+      etcd:
+        condition: service_started
+      minio:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-net
+
+  neo4j:
+    image: neo4j:5
+    container_name: neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-password123}
+      - dbms.security.procedures.unrestricted=*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-password123}", "RETURN 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - ai-net
+
+  minio:
+    image: pgsty/minio:latest
+    container_name: minio
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/minio_data
+    ports:
+      - "9000:9000" # API
+      - "9001:9001" # Console
+    command: server /minio_data --console-address ":9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-net
+
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.20
+    container_name: etcd
+    command:
+      - /usr/local/bin/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    volumes:
+      - etcd_data:/etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+  # LLM server. Models are kept in the ollama_data volume, so they download only once.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    # No published port: the other containers reach it as http://ollama:11434 on ai-net,
+    # and publishing 11434 would clash with an Ollama already installed on the host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    # NVIDIA GPU (Linux, or Windows with WSL2): uncomment to run the models on the GPU.
+    # Needs the NVIDIA Container Toolkit. Without it, the models run on the CPU.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      - ai-net
+
+  # One-shot job: pulls the models named in .env into the ollama container, then exits.
+  # Already-downloaded models are skipped, so later starts take seconds.
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: ollama-pull
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        ollama pull ${EDGE_MODEL:-qwen3:4b-instruct} &&
+        ollama pull ${ANSWER_MODEL:-qwen3:4b-instruct} &&
+        ollama pull ${KG_MODEL:-qwen2.5:1.5b}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - ai-net
+
+  # ============================================
+  # Application Layer (pulled from Docker Hub)
+  # ============================================
+
+  # One-shot job: builds the wiki corpus from the data baked into the image
+  ingestion_pipeline:
+    image: ${DOCKERHUB_USER:?Set DOCKERHUB_USER in .env}/graphrag-ingestion:${TAG:-latest}
+    container_name: ai-ingestion
+    env_file:
+      - .env
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - NEO4J_URI=bolt://neo4j:7687
+      - MILVUS_HOST=milvus-standalone
+      - EDGE_MODEL_BASE_URL=${DOCKER_EDGE_MODEL_BASE_URL:-http://ollama:11434/v1}
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_DISABLE_XET=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - hf_cache:/app/.cache/huggingface
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+      milvus-standalone:
+        condition: service_started
+      neo4j:
+        condition: service_started
+      minio:
+        condition: service_started
+    networks:
+      - ai-net
+
+  query_processor:
+    image: ${DOCKERHUB_USER:?Set DOCKERHUB_USER in .env}/graphrag-query-processor:${TAG:-latest}
+    container_name: ai-query-api
+    env_file:
+      - .env
+    environment:
+      - MILVUS_HOST=milvus-standalone
+      - MILVUS_PORT=19530
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123}
+      - MINIO_ENDPOINT=http://minio:9000
+      - EDGE_MODEL_BASE_URL=${DOCKER_EDGE_MODEL_BASE_URL:-http://ollama:11434/v1}
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_DISABLE_XET=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - hf_cache:/app/.cache/huggingface
+    ports:
+      - "50051:50051"
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+      milvus-standalone:
+        condition: service_started
+      neo4j:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      ai-net:
+        aliases:
+          - query-processor
+
+  # Spring Boot API, also serves the React UI on port 8080
+  orchestration_layer:
+    image: ${DOCKERHUB_USER:?Set DOCKERHUB_USER in .env}/graphrag-orchestration:${TAG:-latest}
+    container_name: ai-orchestration
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_PORT=8080
+      - GRPC_CLIENT_HOST=query-processor
+      - GRPC_CLIENT_PORT=50051
+    depends_on:
+      query_processor:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+volumes:
+  milvus_data:
+  neo4j_data:
+  neo4j_logs:
+  minio_data:
+  etcd_data:
+  ollama_data:
+  hf_cache: # Hugging Face model cache (all-MiniLM-L6-v2), kept across container recreates
+
+networks:
+  ai-net:
+    driver: bridge

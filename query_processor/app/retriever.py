@@ -41,7 +41,7 @@ class HybridRetriever:
         self.graph_retriever = GraphRetriever(self.neo4j_service.driver, self.embedding_service)
         # "Which two files are most similar?": compares files' knowledge graphs (file_similarity.py)
         self.file_similarity = FileSimilarity(self.neo4j_service.driver, self.embedding_service)
-        # Authority ranking for upload workspaces (local push Personalized PageRank)
+        # Authority ranking for the wiki and upload workspaces (local push Personalized PageRank)
         self.local_ppr = LocalPPR(self.neo4j_service.driver)
         # "Is the context enough?" without a model call (graph_engine analyst)
         self.coverage = CoverageCheck(self.neo4j_service.driver)
@@ -121,24 +121,24 @@ class HybridRetriever:
         milvus_results.extend(kg["chunks"])
         candidate_ids += [c["id"] for c in kg["chunks"]]
 
-        # --- STEP 3b: Local Personalized PageRank (upload workspaces) ---
+        # --- STEP 3b: Local Personalized PageRank (wiki and upload workspaces) ---
         # Authority = how strongly each chunk connects to the question's entities and the
-        # vector hits across the whole workspace graph; replaces PageRank on the induced subgraph
+        # vector hits across the whole corpus graph; replaces PageRank on the induced subgraph.
+        # The wiki corpus has no entities, so its seeds are the vector hits alone.
         ppr_nodes = None
-        if corpus_id != WIKI_CORPUS_ID:
-            try:
-                ppr_nodes = self._apply_local_ppr(
-                    query_vector, corpus_id, file_ids, vector_hits, kg.get("named_keys", []),
-                    milvus_results, max_new_chunks=PPR_NEW_CHUNKS,
-                )
-                candidate_ids = [c["id"] for c in milvus_results]
-            except Exception as e:
-                logger.error(f"Local PPR failed, falling back to subgraph PageRank: {e}")
+        try:
+            ppr_nodes = self._apply_local_ppr(
+                query_vector, corpus_id, file_ids if file_expr else None, vector_hits, kg.get("named_keys", []),
+                milvus_results, max_new_chunks=PPR_NEW_CHUNKS,
+            )
+            candidate_ids = [c["id"] for c in milvus_results]
+        except Exception as e:
+            logger.error(f"Local PPR failed, falling back to subgraph PageRank: {e}")
 
         logger.info(f"Extracted {len(candidate_ids)} unique IDs for sub-graph construction")
 
         # Instead of keyword search, query Neo4j to find connections based on IDs from those chunks from milvus search
-        # (only needed for subgraph PageRank: the wiki corpus, or uploads when local PPR failed)
+        # (only needed for the subgraph PageRank fallback, when local PPR failed)
         adjacency_matrix = []
         if candidate_ids and ppr_nodes is None:
             try:

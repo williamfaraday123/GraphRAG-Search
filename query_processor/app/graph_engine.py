@@ -257,8 +257,9 @@ def make_retrieve_context_node(retriever: HybridRetriever):
             )
 
         corpus_id = state.get("corpus_id") or "wiki"
-        if corpus_id != "wiki" and all_chunks and all("ppr_score" in c for c in all_chunks):
-            # Upload workspaces: local Personalized PageRank over the whole workspace graph
+        if all_chunks and all("ppr_score" in c for c in all_chunks):
+            # Local Personalized PageRank over the whole corpus graph (subgraph PageRank is
+            # the fallback when it failed for any round)
             pr_scores = {c["id"]: c["ppr_score"] for c in all_chunks if c.get("id")}
             if ppr_visited:
                 kg_note += f" Personalized PageRank reached {max(ppr_visited)} graph node(s)."

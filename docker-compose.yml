@@ -99,6 +99,8 @@ services:
 
   # 5. Ingestion Pipeline (one-shot job)
   ingestion_pipeline:
+    # Tag used by `docker compose build` and pushed to Docker Hub (docker-compose.hub.yml pulls it)
+    image: ${DOCKERHUB_USER:-graphrag}/graphrag-ingestion:${TAG:-latest}
     build:
       context: ./ingestion_pipeline
       dockerfile: Dockerfile.render
@@ -130,6 +132,7 @@ services:
 
   # 6. Query Processor (gRPC API)
   query_processor:
+    image: ${DOCKERHUB_USER:-graphrag}/graphrag-query-processor:${TAG:-latest}
     build:
       context: ./query_processor
       dockerfile: Dockerfile.render
@@ -166,6 +169,7 @@ services:
 
   # 7. Orchestration Layer (Spring Boot REST API)
   orchestration_layer:
+    image: ${DOCKERHUB_USER:-graphrag}/graphrag-orchestration:${TAG:-latest}
     build:
       context: ./orchestration_layer
       dockerfile: Dockerfile.render
