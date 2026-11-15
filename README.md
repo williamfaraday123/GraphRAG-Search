@@ -359,19 +359,26 @@ docker build -t graphrag-query-processor .
 To publish, on this machine:
 
 Add DOCKERHUB_USER=<your username> to .env.
+
 Run:
 
+```powershell
 docker login
+
 docker compose build ingestion_pipeline query_processor orchestration_layer
+
 docker compose push ingestion_pipeline query_processor orchestration_layer
+```
 
 To run, on the other device:
 
 Create a directory of your choice (e.g. ./GraphRAG-Search) to hold the docker-compose.yml and .env files.
 
+```powershell
 wget -O docker-compose.yml https://github.com/williamfaraday123/GraphRAG-Search/blob/main/docker-compose.hub.yml
 
 wget -O .env https://github.com/williamfaraday123/GraphRAG-Search/blob/main/.env.example
 
 Run docker compose up -d.
+```
 Open http://localhost:8080.
