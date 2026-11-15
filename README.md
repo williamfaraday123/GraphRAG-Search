@@ -364,8 +364,14 @@ Run:
 docker login
 docker compose build ingestion_pipeline query_processor orchestration_layer
 docker compose push ingestion_pipeline query_processor orchestration_layer
+
 To run, on the other device:
 
-Put docker-compose.hub.yml (renamed to docker-compose.yml) and a .env with the same DOCKERHUB_USER in one folder.
+Create a directory of your choice (e.g. ./GraphRAG-Search) to hold the docker-compose.yml and .env files.
+
+wget -O docker-compose.yml https://github.com/williamfaraday123/GraphRAG-Search/blob/main/docker-compose.hub.yml
+
+wget -O .env https://github.com/williamfaraday123/GraphRAG-Search/blob/main/.env.example
+
 Run docker compose up -d.
 Open http://localhost:8080.
