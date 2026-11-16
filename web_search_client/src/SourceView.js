@@ -42,7 +42,7 @@ function SourceView({ uri }) {
         )}
       </header>
       {state.loading && <p className="evidence-loading">Loading…</p>}
-      {state.error && <p className="evidence-error" role="alert">⚠️ {state.error}</p>}
+      {state.error && <p className="evidence-error" role="alert">{state.error}</p>}
       {state.content != null && <article className="source-page-text">{state.content}</article>}
     </div>
   );

@@ -463,34 +463,28 @@ function App() {
     }
   }, [sourceCache, fetchChunkSource]);
 
-  const topAuthorityIndex = chunks.length > 0
-    ? chunks.reduce((best, c, i, arr) => (c.pagerankScore > arr[best].pagerankScore ? i : best), 0)
-    : -1;
-
-  const agentMeta = {
-    planner: { icon: '\uD83E\uDDED', label: 'Planner' },
-    retriever: { icon: '\uD83D\uDD0D', label: 'Retriever' },
-    analyst: { icon: '\uD83E\uDDD0', label: 'Critic' },
-    synthesizer: { icon: '\u270D\uFE0F', label: 'Synthesizer' },
+  const agentLabels = {
+    planner: 'Planner',
+    retriever: 'Retriever',
+    analyst: 'Critic',
+    synthesizer: 'Synthesizer',
   };
 
-  const stageIcons = {
-    PLANNING: '🧭',
-    ANALYZING: '🧐',
-    RETRIEVING: '\uD83D\uDD0D',    //🔍
-    ITERATING: '\uD83D\uDD04',     // 🔄
-    SYNTHESIZING: '\u2728',        // ✨
-  };
+  // The query processor's status stages, shown as numbered steps. A second retrieval round
+  // (after the critic finds a gap) goes back to step 2.
+  const stageSteps = ['Plan', 'Retrieve', 'Check', 'Write'];
+  const stageIndex = {
+    PLANNING: 0, RETRIEVING: 1, ITERATING: 1, ANALYZING: 2, SYNTHESIZING: 3,
+  }[status?.stage] ?? -1;
 
   return (
     <div className="app-container">
+      <div className="app-top">
       <header className="app-header">
-        <div className="brand">
-          <span className="brand-icon">🧠</span>
-          <h1>GraphRAG Search</h1>
-        </div>
+        <h1>GraphRAG Search</h1>
         <p className="brand-subtitle">
-          Hybrid Vector + Knowledge Graph Retrieval with Pregel Authority Ranking
+          Answers from your own files or a set of Wikipedia articles. Passages are ranked by how
+          closely they match the question and by how central they are in the knowledge graph.
         </p>
       </header>
 
@@ -615,7 +609,7 @@ function App() {
                       <div key={id} className="file-preview-item">
                         <h4>{file ? file.filename : id}</h4>
                         {cached?.loading && <span className="evidence-loading">Loading…</span>}
-                        {cached?.error && <span className="evidence-error">⚠️ {cached.error}</span>}
+                        {cached?.error && <span className="evidence-error">{cached.error}</span>}
                         {cached?.content != null && <pre className="file-preview-text">{cached.content}</pre>}
                       </div>
                     );
@@ -661,54 +655,56 @@ function App() {
             className="search-button"
             disabled={isLoading || !query.trim() || (mode === 'files' && !uploadedFiles.length)}
           >
-            {isLoading ? (
-              <span className="spinner" />
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <circle cx="11" cy="11" r="8" />
-                <path d="M21 21l-4.35-4.35" />
-              </svg>
-            )}
+            {isLoading ? 'Searching…' : 'Search'}
           </button>
         </div>
       </form>
 
       {status && (
-        <div className={`status-bar stage-${(status.stage || '').toLowerCase()}`}>
-          <span className="status-icon">{stageIcons[status.stage] || '⏳'}</span>
-          <span className="status-text">
-            <strong>{status.stage}</strong> — {status.message}
-          </span>
+        <div className="progress" role="status">
+          {stageIndex >= 0 && (
+            <ol className="progress-steps">
+              {stageSteps.map((label, i) => (
+                <li
+                  key={label}
+                  className={i < stageIndex ? 'is-done' : i === stageIndex ? 'is-current' : ''}
+                  aria-current={i === stageIndex ? 'step' : undefined}
+                >
+                  <span className="progress-num">{i + 1}</span>
+                  {label}
+                </li>
+              ))}
+            </ol>
+          )}
+          <p className="progress-message">{status.message}</p>
         </div>
       )}
 
       {agentSteps.length > 0 && (
         <div className="agent-trace">
-          <h3 className="agent-trace-label">Agent Trace</h3>
+          <h3 className="agent-trace-label">Search log</h3>
           <ul className="agent-trace-list">
-            {agentSteps.map((step, i) => {
-              const meta = agentMeta[step.agent] || { icon: '🤖', label: step.agent };
-              return (
-                <li key={i} className="agent-trace-item">
-                  <span className="agent-trace-icon">{meta.icon}</span>
-                  <span className="agent-trace-name">{meta.label}</span>
-                  {/* The critic's detail is the model's own Markdown: show its bold, not its asterisks */}
-                  <span className="agent-trace-detail">{renderInline((step.detail || '').replace(/\s+/g, ' '), `trace-${i}`)}</span>
-                </li>
-              );
-            })}
+            {agentSteps.map((step, i) => (
+              <li key={i} className="agent-trace-item">
+                <span className="agent-trace-name">{agentLabels[step.agent] || step.agent}</span>
+                {/* The critic's detail is the model's own Markdown: show its bold, not its asterisks */}
+                <span className="agent-trace-detail">{renderInline((step.detail || '').replace(/\s+/g, ' '), `trace-${i}`)}</span>
+              </li>
+            ))}
           </ul>
         </div>
       )}
 
       {error && (
-        <div className="error-bar">
-          <span>⚠️</span> {error}
+        <div className="error-bar" role="alert">
+          {error}
         </div>
       )}
+      </div>
 
       {(streamedText || done) && (
-        <div className="results-panel" ref={resultRef}>
+        <div className="results" ref={resultRef}>
+          <div className="results-main">
           <div className="answer-section" ref={answerRef}>
             <h2 className="answer-label">Answer</h2>
             {(() => {
@@ -753,7 +749,6 @@ function App() {
                 <>
                   <div className="answer-text">
                     <Markdown text={answer} />
-                    {isLoading && <span className="cursor-blink">▌</span>}
                   </div>
                   {checks && (
                     <details className="answer-checks">
@@ -767,14 +762,39 @@ function App() {
           </div>
 
           {done && confidence !== null && (
-            <div className="metadata-row">
-              <span className="confidence-badge">
-                Confidence: {(confidence * 100).toFixed(0)}%
-              </span>
-            </div>
+            <p className="confidence">
+              Confidence {(confidence * 100).toFixed(0)}%
+            </p>
           )}
 
-          {done && graphPaths.length > 0 && (() => {
+          {sources.length > 0 && (
+            <div className="sources-section">
+              <h3>Sources</h3>
+              <ul className="sources-list">
+                {sources.map((src, i) => (
+                  <li key={i} className="source-item">
+                    {/* Opens the full text on its own page in a new tab */}
+                    <a
+                      className="source-link"
+                      href={sourcePageHref(src)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Open the full text of ${formatSourceLabel(src)} in a new tab`}
+                    >
+                      <span className="source-name">{formatSourceLabel(src)}</span>
+                      <span className="source-text">{sourcePath(src)}</span>
+                      <span className="visually-hidden"> (opens in a new tab)</span>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          </div>
+
+          {done && (graphPaths.length > 0 || chunks.length > 0) && (
+          <aside className="results-side" aria-label="Evidence">
+          {graphPaths.length > 0 && (() => {
             const sharedFacts = pathLabel === 'Shared facts';
             return (
             <div className="graph-reasoning" id="graph-reasoning" aria-labelledby="graph-reasoning-title">
@@ -845,7 +865,7 @@ function App() {
             );
           })()}
 
-          {done && chunks.length > 0 && (
+          {chunks.length > 0 && (
             <div className="evidence-section">
               <h3 className="evidence-label">Evidence ({chunks.length} chunks)</h3>
               {mapOpen && (
@@ -867,34 +887,32 @@ function App() {
                       {...(mappable ? hoverProps(chunkHighlight(c.chunkId)) : {})}
                     >
                       <div className="evidence-header">
-                        {i === topAuthorityIndex && (
-                          <span className="evidence-badge">🏆 Top Authority</span>
-                        )}
+                        <span className="evidence-source">{formatSourceLabel(c.source)}</span>
                         {c.foundByGraph && (
-                          <span className="evidence-badge evidence-badge-graph"
+                          <span className="evidence-badge-graph"
                             title="Vector search did not return this chunk; a knowledge-graph fact path led to it">
                             Found via knowledge graph
                           </span>
                         )}
-                        <span className="evidence-source">{formatSourceLabel(c.source)}</span>
                       </div>
                       <p className="evidence-snippet">{c.content}</p>
                       <div className="evidence-scores">
-                        <span className="score-pill score-semantic">Semantic {Math.round((c.milvusScore || 0) * 100)}%</span>
-                        <span className="score-pill score-authority">Authority {Math.round((c.pagerankScore || 0) * 100)}%</span>
+                        <span>Semantic {Math.round((c.milvusScore || 0) * 100)}%</span>
+                        <span>Authority {Math.round((c.pagerankScore || 0) * 100)}%</span>
                         {c.graphScore > 0 && (
-                          <span className="score-pill score-graph">Graph {Math.round(c.graphScore * 100)}%</span>
+                          <span>Graph {Math.round(c.graphScore * 100)}%</span>
                         )}
-                        <span className="score-pill score-hybrid">Hybrid {Math.round((c.hybridScore || 0) * 100)}%</span>
+                        <span className="score-hybrid">Hybrid {Math.round((c.hybridScore || 0) * 100)}%</span>
                       </div>
                       <div className="evidence-actions">
                         {c.source && (
                           <button
                             type="button"
                             className="evidence-toggle"
+                            aria-expanded={isExpanded}
                             onClick={() => toggleChunkSource(c, i)}
                           >
-                            {isExpanded ? 'Hide full source ▲' : 'View full source ▼'}
+                            {isExpanded ? 'Hide full source' : 'View full source'}
                           </button>
                         )}
                         {mappable && (
@@ -911,7 +929,7 @@ function App() {
                       {isExpanded && (
                         <div className="evidence-full-source">
                           {cached?.loading && <span className="evidence-loading">Loading…</span>}
-                          {cached?.error && <span className="evidence-error">⚠️ {cached.error}</span>}
+                          {cached?.error && <span className="evidence-error">{cached.error}</span>}
                           {cached?.content && <pre className="evidence-full-text">{cached.content}</pre>}
                         </div>
                       )}
@@ -921,42 +939,19 @@ function App() {
               </ul>
             </div>
           )}
-
-          {sources.length > 0 && (
-            <div className="sources-section">
-              <h3>Sources</h3>
-              <ul className="sources-list">
-                {sources.map((src, i) => (
-                  <li key={i} className="source-item">
-                    <span className="source-icon" aria-hidden="true">📄</span>
-                    {/* Opens the full text on its own page in a new tab */}
-                    <a
-                      className="source-link"
-                      href={sourcePageHref(src)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title={`Open the full text of ${formatSourceLabel(src)} in a new tab`}
-                    >
-                      <span className="source-name">{formatSourceLabel(src)}</span>
-                      <span className="source-text">{sourcePath(src)}</span>
-                      <span className="visually-hidden"> (opens in a new tab)</span>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
+          </aside>
           )}
         </div>
       )}
 
       {!streamedText && !isLoading && !error && (
         <div className="empty-state">
-          <div className="empty-icon">⚡</div>
-          <p>Powered by Milvus Vector DB, Neo4j Knowledge Graph &amp; LangGraph Pregel Engine</p>
-          <p className="empty-hint">
+          <p>
             {mode === 'files' && !uploadedFiles.length
-              ? 'Upload text, Markdown, PDF, Word (.docx) or MP3 audio files to get started'
-              : 'Type a question above to start searching'}
+              ? 'Upload a text, Markdown, PDF, Word or MP3 file above, then ask a question about it.'
+              : mode === 'files'
+                ? 'Ask a question about your files. Tick files above to search only those.'
+                : 'Ask a question about the articles in the wiki dump.'}
           </p>
         </div>
       )}
