@@ -1,5 +1,5 @@
 """
-LLM-built knowledge graph for uploaded files.
+LLM-built knowledge graph for uploaded files and the wiki corpus.
 
 After a file is indexed, a background worker sends each sentence of each chunk to a
 small local model (Ollama, KG_MODEL, default qwen2.5:1.5b) and asks for the facts it
@@ -20,6 +20,9 @@ Retrieval matches nodes by chunk_id, which entities don't have, so they never en
 search results. A search stops the sentence being extracted and extraction waits until
 no search is running, so the two don't compete for the same CPU-bound model; the stopped
 sentence is redone from the start. Expect roughly 4 s per sentence on CPU.
+
+The wiki corpus goes through the same extraction, but offline: build_wiki.py calls
+process_file for each article, and the result ships as a snapshot (see the README).
 
 Configuration:
   KG_ENABLED        true | false                         (default: true)
@@ -55,6 +58,8 @@ For each fact give:
 - relation: what the subject does, is, or has (a short verb phrase, e.g. "dominated", "was weakened by", "had")
 - object: the thing the relation points to (a short noun phrase from the sentence, different from the subject)
 
+Keep verbs in the relation, not in the subject or object: for "the town grew by trading with Venice",
+the object is "Venice" and the relation is "grew by trading with".
 Give at most 3 facts. Resolve "it", "they", "their" to the noun they refer to, using this earlier text if needed: "{previous}"
 Return {{"facts": []}} if the sentence states no fact."""
 
@@ -148,6 +153,51 @@ def _valid_entity(name):
     )
 
 
+# Nouns ending in -ing that start real entity names ("building of the dam")
+_ING_NOUNS = {
+    "building", "painting", "meeting", "wedding", "morning", "evening", "beginning", "king",
+    "thing", "ring", "string", "spring", "feeling", "ending", "setting", "funding", "housing",
+    "clothing", "ceiling", "offering", "earnings", "savings", "opening", "hearing", "ruling",
+}
+
+
+def _verb_out_of_object(relation, obj):
+    """'survived' + 'learning from Hollywood' -> 'survived learning from' + 'Hollywood':
+    an object that starts with a verb and a preposition hides the real entity, so facts
+    about it never meet facts about Hollywood."""
+    words = obj.split()
+    i = 0  # skip "partly by", "largely through": adverbs and "by" before the verb
+    while i < len(words) and (words[i].endswith("ly") or words[i] == "by"):
+        i += 1
+    verb = words[i] if i < len(words) else ""
+    if (len(words) - i >= 3 and verb.islower() and verb.endswith("ing") and len(verb) >= 5
+            and verb not in _ING_NOUNS and words[i + 1].lower() in LEADING_PREPOSITIONS
+            and len(relation.split()) + i + 2 <= 8):
+        return " ".join([relation, *words[:i + 2]]), " ".join(words[i + 2:])
+    return relation, obj
+
+
+_PASSIVE_AGENT = re.compile(
+    r"^(?:was|were|is|are|be|been|being|has been|have been|had been)\s+(.+?)\s+by\s+(.+)$", re.I)
+
+
+def _agent_out_of_relation(relation, obj, sentence_words):
+    """'Europe' + 'was bought up by Hollywood' + 'artists' -> 'Europe' + 'had artists bought
+    up by' + 'Hollywood': a proper name inside a passive relation is the real actor, and left
+    there it links to nothing. The object moves into the relation and the actor becomes the
+    object."""
+    m = _PASSIVE_AGENT.match(relation)
+    if not m or not obj:
+        return relation, obj
+    verb, agent = m.group(1), _clean_phrase(m.group(2))
+    if not (_valid_entity(agent) and entity_kind(agent) == "name" and _in_sentence(agent, sentence_words)):
+        return relation, obj
+    moved = f"had {obj} {verb} by"
+    if len(moved.split()) > 10:
+        return relation, obj
+    return moved, agent
+
+
 def _split_list(phrase):
     """'Soviet Union and Japan' -> ['Soviet Union', 'Japan'] when every part is short."""
     parts = [_clean_phrase(p) for p in _LIST_SPLIT.split(phrase)]
@@ -175,8 +225,10 @@ def validate_facts(sentence, raw_facts):
             continue
         if all(w.lower() in DETERMINERS | LEADING_PREPOSITIONS for w in relation.split()):
             continue  # no real word ("since", "by")
+        relation, raw_object = _agent_out_of_relation(relation, _clean_phrase(raw.get("object")), sentence_words)
+        relation, raw_object = _verb_out_of_object(relation, raw_object)
         for subject in _split_list(_clean_phrase(raw.get("subject"))):
-            for obj in _split_list(_clean_phrase(raw.get("object"))):
+            for obj in _split_list(raw_object):
                 if not (_valid_entity(subject) and _valid_entity(obj)):
                     continue
                 if set(_content_words(obj)) <= set(_content_words(relation)):
@@ -304,9 +356,11 @@ def _close_now(connection):
             pass
 
 class KnowledgeGraphBuilder:
-    def __init__(self, neo4j_driver, resolver=None):
+    def __init__(self, neo4j_driver, resolver=None, background=True):
         """resolver: entity_resolution.EntityResolver; entities that name the same concept as
-        an existing one are written onto that entity instead of a new node."""
+        an existing one are written onto that entity instead of a new node.
+        background=False: no worker thread; the caller runs process_file itself
+        (build_wiki.py builds the wiki corpus this way, offline)."""
         self.driver = neo4j_driver
         self.resolver = resolver
         self.enabled = os.getenv("KG_ENABLED", "true").lower() not in {"0", "false", "no"}
@@ -317,8 +371,8 @@ class KnowledgeGraphBuilder:
         self._search_cv = threading.Condition()
         self._active_call = None   # open connection of the model call in progress
         self._call_stopped = False
-        if self.enabled:
-            self._ensure_indexes()
+        self._ensure_indexes()
+        if self.enabled and background:
             threading.Thread(target=self._run, name="kg-builder", daemon=True).start()
             self.enqueue_backlog()
 
@@ -375,7 +429,8 @@ class KnowledgeGraphBuilder:
         self._queue.put((corpus_id, file_id))
 
     def enqueue_backlog(self):
-        """Queues every uploaded file that still has unprocessed chunks (e.g. after a restart)."""
+        """Queues every uploaded file that still has unprocessed chunks (e.g. after a restart).
+        The wiki is left out: it is extracted offline by build_wiki.py."""
         if not self.enabled:
             return
         try:
@@ -420,16 +475,22 @@ class KnowledgeGraphBuilder:
                 session.run(
                     "CREATE INDEX entity_corpus_key IF NOT EXISTS FOR (e:Entity) ON (e.corpus_id, e.key)"
                 ).consume()
+                # "Which entities contain the name Hollywood?" (graph_retrieval name groups)
+                session.run(
+                    "CREATE TEXT INDEX entity_key_text IF NOT EXISTS FOR (e:Entity) ON (e.key)"
+                ).consume()
         except Exception:
             logger.exception("Could not create the Entity index")
 
     def _merge_existing(self):
         """Folds duplicates stored before entity resolution existed (or since a file delete
-        left a stale cache); a no-op once a workspace is clean."""
+        left a stale cache); a no-op once a workspace is clean. Skips the wiki, whose
+        entities were resolved as they were written by build_wiki.py (re-checking its tens
+        of thousands of entities would delay every start)."""
         try:
             with self.driver.session() as session:
                 corpora = [r["c"] for r in session.run(
-                    "MATCH (e:Entity) RETURN DISTINCT e.corpus_id AS c").data()]
+                    "MATCH (e:Entity) WHERE e.corpus_id <> 'wiki' RETURN DISTINCT e.corpus_id AS c").data()]
             for corpus_id in corpora:
                 self.resolver.merge_existing(corpus_id)
         except Exception:
@@ -443,7 +504,7 @@ class KnowledgeGraphBuilder:
             with self._queued_lock:
                 self._queued.discard((corpus_id, file_id))
             try:
-                self._process_file(corpus_id, file_id)
+                self.process_file(corpus_id, file_id)
             except ConnectionError as exc:
                 logger.warning("Knowledge graph paused: %s. Retrying in %ds", exc, RETRY_DELAY_SECONDS)
                 time.sleep(RETRY_DELAY_SECONDS)
@@ -451,7 +512,9 @@ class KnowledgeGraphBuilder:
             except Exception:
                 logger.exception("Knowledge-graph extraction failed for file %s", file_id)
 
-    def _process_file(self, corpus_id, file_id):
+    def process_file(self, corpus_id, file_id):
+        """Extracts every pending chunk of one file. Returns the number of facts written.
+        Raises ConnectionError (with the rest left pending) if Ollama is unreachable."""
         with self.driver.session() as session:
             # Every chunk, not only pending ones: each needs the previous chunk's text
             # to skip the overlapping sentences it repeats
@@ -465,7 +528,7 @@ class KnowledgeGraphBuilder:
             ).data()
         pending = [i for i, c in enumerate(chunks) if c["status"] is None]
         if not pending:
-            return
+            return 0
         logger.info("Knowledge graph: extracting %d chunk(s) of file %s", len(pending), file_id)
         started = time.time()
         total_facts = 0
@@ -488,6 +551,7 @@ class KnowledgeGraphBuilder:
         logger.info(
             "Knowledge graph: file %s done, %d fact(s) in %.0fs", file_id, total_facts, time.time() - started
         )
+        return total_facts
 
     def _mark(self, chunk_id, status):
         with self.driver.session() as session:

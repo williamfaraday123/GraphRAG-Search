@@ -36,7 +36,7 @@ python main.py
 
 ### Upload workspaces
 
-The query processor also accepts `UploadCorpusFile` and `ListCorpusFiles` gRPC calls from the Spring Boot API. Upload indexing supports UTF-8 `.txt` and `.md` files, creates a dedicated Milvus collection per workspace, tags Neo4j chunks with the workspace ID, and stores source files under `uploads/{corpusId}/` in MinIO. Searches use the requested corpus ID; `wiki` continues to use the existing `ai_docs` collection.
+The query processor also accepts `UploadCorpusFile` and `ListCorpusFiles` gRPC calls from the Spring Boot API. Upload indexing supports UTF-8 `.txt` and `.md` files, creates a dedicated Milvus collection per workspace, tags Neo4j chunks with the workspace ID, and stores source files under `uploads/{corpusId}/` in MinIO. Searches use the requested corpus ID; `wiki` uses the `ai_docs` collection. The wiki is indexed by the same code, offline: `app/build_wiki.py` (see "Build the wiki snapshot" in the root README).
 
 File structure:
 ```

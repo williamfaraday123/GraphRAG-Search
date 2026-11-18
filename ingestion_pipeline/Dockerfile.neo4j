@@ -1,0 +1,10 @@
+# Wiki snapshot, Neo4j part: the graph dump and the script that loads it into an empty
+# neo4j_data volume. The base image must be the same Neo4j version as the `neo4j` service
+# (or newer), because a dump only loads into its own version or a later one.
+ARG NEO4J_IMAGE=neo4j:5.26
+FROM ${NEO4J_IMAGE}
+
+COPY snapshot/neo4j.dump snapshot/manifest.json /wiki-snapshot/
+COPY neo4j-load.sh /neo4j-load.sh
+
+ENTRYPOINT ["/bin/bash", "/neo4j-load.sh"]

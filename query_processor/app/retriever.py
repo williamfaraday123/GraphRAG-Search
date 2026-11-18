@@ -37,7 +37,7 @@ class HybridRetriever:
             aws_secret_access_key=os.getenv("MINIO_ROOT_PASSWORD", "minioadmin"),
             endpoint_url=os.getenv("MINIO_ENDPOINT", "http://localhost:9000"),
         )
-        # Follows facts extracted from uploads (knowledge_graph.py) to chunks vector search misses
+        # Follows extracted facts (knowledge_graph.py) to chunks vector search misses
         self.graph_retriever = GraphRetriever(self.neo4j_service.driver, self.embedding_service)
         # "Which two files are most similar?": compares files' knowledge graphs (file_similarity.py)
         self.file_similarity = FileSimilarity(self.neo4j_service.driver, self.embedding_service)
@@ -102,12 +102,12 @@ class HybridRetriever:
         # Assumption: Your Milvus results have a field 'id' that matches Neo4j 'chunk_id'
         candidate_ids = [item['id'] for item in milvus_results if 'id' in item]
 
-        # --- STEP 3a: Knowledge graph (upload workspaces) ---
+        # --- STEP 3a: Knowledge graph (wiki and upload workspaces) ---
         # Walks extracted facts from entities in the question; adds the chunks behind the
         # best fact paths, including ones vector search didn't return.
         kg = {"seeds": [], "paths": [], "chunk_scores": {}, "chunks": [], "relations": []}
         kg_search = os.getenv("KG_SEARCH_ENABLED", "true").lower() not in {"0", "false", "no"}
-        if corpus_id != WIKI_CORPUS_ID and kg_search:
+        if kg_search:
             try:
                 kg = self.graph_retriever.search(
                     query, query_vector, corpus_id, file_ids=file_ids or None,
@@ -124,7 +124,6 @@ class HybridRetriever:
         # --- STEP 3b: Local Personalized PageRank (wiki and upload workspaces) ---
         # Authority = how strongly each chunk connects to the question's entities and the
         # vector hits across the whole corpus graph; replaces PageRank on the induced subgraph.
-        # The wiki corpus has no entities, so its seeds are the vector hits alone.
         ppr_nodes = None
         try:
             ppr_nodes = self._apply_local_ppr(
@@ -183,6 +182,28 @@ class HybridRetriever:
             "ppr_nodes": ppr_nodes,
             "named_keys": kg.get("named_keys", []),  # entities the query names (coverage check)
         }
+
+    def connect_question(self, query: str, corpus_id: str, keys: List[str], file_ids: List[str] = None,
+                         known_chunk_ids=(), top_k: int = 5) -> Dict[str, Any]:
+        """Knowledge-graph paths joining the entities a whole question names (graph_retrieval
+        connect()), which separate sub-query searches can't find. New chunks behind them get
+        no PPR score (they weren't in any search's PPR run)."""
+        empty = {"paths": [], "chunk_scores": {}, "chunks": []}
+        if len(keys) < 2 or os.getenv("KG_SEARCH_ENABLED", "true").lower() in {"0", "false", "no"}:
+            return empty
+        corpus_id = normalize_corpus_id(corpus_id)
+        try:
+            result = self.graph_retriever.connect(
+                self.embedding_service.generate_embedding(query), corpus_id, keys,
+                file_ids=file_ids if file_ids and corpus_id != WIKI_CORPUS_ID else None,
+                known_chunk_ids=known_chunk_ids, max_new_chunks=top_k,
+            )
+        except Exception as e:
+            logger.error(f"Knowledge-graph connection search failed: {e}")
+            return empty
+        for c in result["chunks"]:
+            c["ppr_score"] = 0.0
+        return result
 
     def _apply_local_ppr(self, query_vector, corpus_id, file_ids, vector_hits, named_keys,
                          chunks, max_new_chunks):

@@ -23,8 +23,8 @@ The system turns source documents into a searchable knowledge base, then combine
                                                                 ^        ^        ^
                                                                 |        |        |
                                                         +-------+--------+--------+
-                                                        | Ingestion pipeline      |
-                                                        | Python one-shot job     |
+                                                        | Wiki snapshot restore   |
+                                                        | one-shot jobs           |
                                                         +-------------------------+
 ```
 
@@ -35,27 +35,32 @@ The system turns source documents into a searchable knowledge base, then combine
 | React web client | Collects a query and renders progress, streamed answer text, and ranked evidence. | `web_search_client/` |
 | Orchestration layer | Public HTTP API. Converts the Python gRPC response stream into browser-friendly Server-Sent Events (SSE). It also proxies source-document requests. | `orchestration_layer/` |
 | Query processor | Runs retrieval, graph-aware ranking, and answer generation. It exposes the gRPC contract shared with Spring Boot. | `query_processor/app/` and `query_processor/proto/query.proto` |
-| Ingestion pipeline | Imports raw files, creates chunks and their relationships, writes the knowledge graph, and indexes chunks in Milvus. | `ingestion_pipeline/` |
-| MinIO | S3-compatible object storage for the original source documents, in the `rag-datasets` bucket. | Docker service `minio` |
-| Neo4j | Stores `Chunk` nodes and relationships between chunks. | Docker service `neo4j` |
-| Milvus | Stores 384-dimensional embeddings for chunk similarity search in the `ai_docs` collection. | Docker service `milvus-standalone` |
+| Wiki build | Offline: indexes each WikiText article like an upload and extracts its knowledge graph. | `query_processor/app/build_wiki.py`, `docker-compose.wiki-build.yml` |
+| Wiki snapshot | Exports the built wiki (Neo4j dump, Milvus vectors, article texts) and restores it into a new install. | `ingestion_pipeline/` |
+| MinIO | S3-compatible object storage for document text (uploads and wiki articles), in the `rag-datasets` bucket. | Docker service `minio` |
+| Neo4j | Stores `Chunk` nodes, `NEXT_CHUNK` relations, and the knowledge graph (`Entity` nodes, `MENTIONS` and `FACT` relationships). | Docker service `neo4j` |
+| Milvus | Stores 384-dimensional chunk embeddings: `ai_docs` for the wiki, `corpus_<uuid>` per upload workspace. | Docker service `milvus-standalone` |
 | etcd | Stores Milvus metadata; it is an internal Milvus dependency. | Docker service `etcd` |
 
-## Ingestion and indexing flow
+## Indexing flow
 
-The ingestion pipeline is a batch process. In Docker, its entrypoint runs these steps in order:
+Uploads and wiki articles are indexed by the same code (`CorpusIndexer.index_text`, then `KnowledgeGraphBuilder.process_file`):
 
-1. `upload_to_minio.py` uploads files from `ingestion_pipeline/raw_data/` to MinIO.
-2. `main.py` loads the stored documents, splits them into chunks, and generates relations between chunks.
-3. `GraphBuilder` writes chunk nodes and relations to Neo4j.
-4. `index_to_milvus.py` reads chunks from Neo4j, creates embeddings using `all-MiniLM-L6-v2`, and upserts them into Milvus.
+1. Split the text into chunks with ids `<file_id>:<index>`, and link consecutive chunks with `NEXT_CHUNK`.
+2. Embed the chunks with `all-MiniLM-L6-v2` and write them to Neo4j and the corpus's Milvus collection; store the text in MinIO.
+3. Extract facts sentence by sentence with `KG_MODEL`, keep those whose subject and object both appear in the sentence, merge entities that name the same concept, and write `Entity` nodes with `MENTIONS` and `FACT` relationships.
+
+Uploads run steps 1–2 during the upload request and step 3 in a background thread. The wiki runs all three offline in `build_wiki.py`, because step 3 takes hours, and is shipped as a snapshot:
 
 ```text
-raw_data/ -> MinIO -> DocumentChunker -> EdgeGenerator -> Neo4j
-                                                   \-> index_to_milvus.py -> Milvus
+raw_data/*.txt -> build_wiki.py (separate Compose project, empty databases)
+               -> wiki_snapshot.py export (Milvus vectors, MinIO texts) + neo4j-admin database dump
+               -> images graphrag-wiki-neo4j and graphrag-wiki-restore
+new install:   wiki-neo4j-load (neo4j-admin database load into the empty volume, before Neo4j starts)
+               wiki-restore    (vectors into ai_docs, texts into MinIO)
 ```
 
-`DocumentChunker` uses deterministic chunk IDs, so the graph and vector index can refer to the same source chunk. `EdgeGenerator` uses the configured LLM to identify semantic relations; it also adds sequential chunk connections. The LLM and connection details are configured through environment variables.
+Both restore jobs only fill empty stores, so they never overwrite an existing install's data.
 
 ## Search flow
 
@@ -65,14 +70,16 @@ raw_data/ -> MinIO -> DocumentChunker -> EdgeGenerator -> Neo4j
 4. For each search query, `HybridRetriever`:
    - embeds the query with `all-MiniLM-L6-v2`;
    - retrieves similar chunks from Milvus;
-   - runs local push Personalized PageRank from the vector hits (and, in upload workspaces, the entities the question names) over the corpus graph in Neo4j; and
+   - follows knowledge-graph fact paths from the entities the question names, loading only the facts within two hops of them (entities that contain the same proper name, such as "Hollywood films" and "learning from Hollywood", count as one stop);
+   - runs local push Personalized PageRank from the vector hits and those entities over the corpus graph in Neo4j; and
    - can retrieve the original document from MinIO for source access.
-5. The LangGraph workflow re-ranks chunks by semantic score plus an authority score. Authority is local push Personalized PageRank (`local_ppr.py`) over the whole corpus graph, for both the wiki and upload workspaces. For uploads the graph has chunks, entities, and `NEXT_CHUNK`, `MENTIONS` and `FACT` edges, and the walk starts from the entities the question names and the vector hits. The wiki graph has no entities: the walk starts from the vector hits and follows the chunk relations the ingestion pipeline wrote, weighted by the LLM's confidence. Neighbours are fetched from Neo4j as the push reaches them, so the cost does not grow with corpus size. If local PPR fails, the retriever falls back to PageRank over the Neo4j subgraph induced by the retrieved chunks. Weights: `0.6 × semantic + 0.4 × authority`, or `0.5 × semantic + 0.2 × authority + 0.3 × fact-path relevance` when knowledge-graph paths were found.
-6. The analyst can request another retrieval round when it finds a gap; the workflow allows at most two refinement iterations. In upload workspaces where the question names entities in the knowledge graph, the analyst uses a graph coverage check (`coverage.py`) instead of a model call: the context is enough when a chunk in it mentions every named entity that the searched files mention; otherwise the next round searches each missing entity's strongest fact. Other questions (wiki, or no named entities) still use the model; file-comparison questions skip the check.
+   After the first round, the workflow also searches for fact chains (up to 3 facts) that join entities from different parts of the question, which separate sub-query searches can't find; the answer model is given them as chains.
+5. The LangGraph workflow re-ranks chunks by semantic score plus an authority score. Authority is local push Personalized PageRank (`local_ppr.py`) over the whole corpus graph, for both the wiki and upload workspaces. The graph has chunks, entities, and `NEXT_CHUNK`, `MENTIONS` and `FACT` edges, and the walk starts from the entities the question names and the vector hits. Neighbours are fetched from Neo4j as the push reaches them, so the cost does not grow with corpus size. If local PPR fails, the retriever falls back to PageRank over the Neo4j subgraph induced by the retrieved chunks. Weights: `0.6 × semantic + 0.4 × authority`, or `0.5 × semantic + 0.2 × authority + 0.3 × fact-path relevance` when knowledge-graph paths were found.
+6. The analyst can request another retrieval round when it finds a gap; the workflow allows at most two refinement iterations. When the question names entities in the knowledge graph, the analyst uses a graph coverage check (`coverage.py`) instead of a model call: the context is enough when a chunk in it mentions every named entity that the searched files mention; otherwise the next round searches each missing entity's strongest fact. Questions that name no known entity still use the model; file-comparison questions skip the check.
 7. The synthesizer LLM produces the final answer from the highest-ranked evidence chunks. It streams the model's output as it is written (LangGraph's `custom` stream mode), so the browser shows the answer while the model is still writing it.
 8. The query processor streams statuses, agent steps, answer text, and final evidence over gRPC. Spring Boot relays them as SSE events to the browser. The final `done` event carries the complete answer, which replaces the streamed text; corrections applied after the model finishes (such as restored option labels) appear at that point.
 
-For an upload workspace, the query processor selects the workspace-specific Milvus collection and filters Neo4j relationships by `corpus_id`. The answer synthesizer is instructed to rely only on retrieved upload context. The wiki path retains its existing `ai_docs` collection and behavior.
+The query processor selects the corpus's Milvus collection (`ai_docs` for the wiki, `corpus_<uuid>` for a workspace) and filters Neo4j entities and facts by `corpus_id`. For uploads, the answer synthesizer is instructed to rely only on retrieved upload context.
 
 ## User-uploaded corpus flow
 
@@ -108,17 +115,20 @@ The source of truth for the internal interface is [query.proto](query_processor/
 
 ## Runtime topology
 
-`docker-compose.yml` defines seven services:
+`docker-compose.yml` defines these services:
 
 | Service | Host port | Notes |
 |---|---:|---|
 | `milvus-standalone` | 19530 | Vector database |
-| `neo4j` | 7474, 7687 | Browser and Bolt driver |
+| `neo4j` | 7474, 7687 | Browser and Bolt driver; pinned to `neo4j:5.26` so the wiki dump loads |
 | `minio` | 9000, 9001 | S3 API and console |
 | `etcd` | — | Internal Milvus dependency |
-| `ingestion_pipeline` | — | Batch ingestion/indexing container |
+| `wiki-neo4j-load` | — | One-shot, profile `wiki`: loads the wiki's Neo4j dump into an empty volume before Neo4j starts |
+| `wiki-restore` | — | One-shot, profile `wiki`: restores the wiki's vectors and article texts |
 | `query_processor` | 50051 | Internal gRPC service, also exposed for local development |
 | `orchestration_layer` | 8080 | Public backend API |
+
+`docker-compose.hub.yml` runs the same services from Docker Hub images, with the wiki jobs always on, plus `ollama` and the one-shot `ollama-pull`. `docker-compose.wiki-build.yml` is a separate project (`graphrag-wiki-build`) with its own databases, used only to build the wiki snapshot.
 
 Within Docker Compose, services communicate over the `ai-net` network using service names rather than `localhost`. Persistent Docker volumes hold Milvus, Neo4j, MinIO, etcd, and the Hugging Face model cache.
 
@@ -126,15 +136,19 @@ Within Docker Compose, services communicate over the `ai-net` network using serv
 
 - Database endpoints and credentials are supplied through `.env` and Docker Compose environment variables.
 - The embedding model must remain compatible with the Milvus collection dimension (currently 384 dimensions).
-- The planner, analyst, edge generator, and synthesizer use the configured LLM endpoint and model. The default query-side configuration points at an OpenAI-compatible Ollama endpoint.
+- The planner, analyst and synthesizer use the configured LLM endpoint and models; knowledge-graph extraction uses `KG_MODEL` through Ollama's API. The defaults point at an Ollama endpoint.
+- The wiki snapshot is tied to the embedding model, `CHUNK_SIZE`/`CHUNK_OVERLAP`, `KG_MODEL` and the Neo4j version it was built with; rebuild it when any of these change.
 - The browser does not access MinIO directly; source content passes through the orchestration layer and query processor.
 
 ## Code map
 
 | Path | What to inspect |
 |---|---|
-| `ingestion_pipeline/main.py` | Knowledge-graph ingestion orchestration |
-| `ingestion_pipeline/index_to_milvus.py` | Neo4j-to-Milvus indexing |
+| `query_processor/app/build_wiki.py` | Offline wiki build: WikiText articles indexed and extracted like uploads |
+| `ingestion_pipeline/wiki_snapshot.py`, `neo4j-load.sh` | Wiki snapshot export and restore |
+| `query_processor/app/corpus_indexer.py` | Chunking, embedding and storage for uploads and wiki articles |
+| `query_processor/app/knowledge_graph.py` | Sentence-by-sentence fact extraction |
+| `query_processor/app/graph_retrieval.py` | Knowledge-graph fact paths from the entities a question names |
 | `query_processor/app/main.py` | gRPC server and streamed responses |
 | `query_processor/app/retriever.py` | Milvus, Neo4j, and object-storage retrieval |
 | `query_processor/app/graph_engine.py` | LangGraph workflow, PageRank, and LLM stages |

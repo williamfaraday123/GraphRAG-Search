@@ -92,14 +92,23 @@ class CorpusIndexer:
         if not text.strip():
             raise ValueError("The uploaded file has no searchable text")
 
-        file_id = str(uuid.uuid4())
+        return self.index_text(corpus_id, str(uuid.uuid4()), filename, text)
+
+    def index_text(self, corpus_id: str, file_id: str, filename: str, text: str):
+        """Chunks, embeds and stores one document's text: chunks and NEXT_CHUNK edges in
+        Neo4j, vectors in the corpus's Milvus collection, the text in MinIO. Used for
+        uploads (after text extraction) and by build_wiki.py for each wiki article, so
+        both corpora share one layout. Knowledge-graph extraction runs afterwards."""
+        self._ensure_bucket()
+        corpus_id = normalize_corpus_id(corpus_id)
+        file_id = normalize_file_id(file_id)
         # Only the extracted text is stored; the original PDF/DOCX/MP3 bytes are discarded
         object_key = f"uploads/{corpus_id}/{file_id}/{stored_text_name(filename)}"
         source_uri = f"s3://{self.bucket_name}/{object_key}"
         chunks_text = self.splitter.split_text(text)
         chunks_text = chunks_text[:MAX_CHUNKS_PER_FILE]
         if not chunks_text:
-            raise ValueError("No searchable text was found in the uploaded file")
+            raise ValueError("No searchable text was found in the file")
 
         nodes = [
             {
@@ -306,32 +315,33 @@ class CorpusIndexer:
                 session.run(upsert_edges, edges=edges).consume()
 
     @classmethod
+    def create_collection(cls, collection_name, dim, index_params):
+        """Creates an empty chunk collection (doc_id, content, source_url, vector).
+        ingestion_pipeline/wiki_snapshot.py restores the wiki into the same schema."""
+        cls._connect_milvus()
+        fields = [
+            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+            FieldSchema(name="doc_id", dtype=DataType.VARCHAR, max_length=256),
+            FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
+            FieldSchema(name="source_url", dtype=DataType.VARCHAR, max_length=1024),
+            FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=dim),
+        ]
+        collection = Collection(
+            name=collection_name,
+            schema=CollectionSchema(fields, description="Chunk embeddings"),
+        )
+        collection.create_index(field_name="vector", index_params=index_params)
+        return collection
+
+    @classmethod
     def _write_vectors(cls, collection_name, nodes, vectors):
         cls._connect_milvus()
         if not utility.has_collection(collection_name):
-            fields = [
-                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                FieldSchema(name="doc_id", dtype=DataType.VARCHAR, max_length=256),
-                FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
-                FieldSchema(name="source_url", dtype=DataType.VARCHAR, max_length=1024),
-                FieldSchema(
-                    name="vector",
-                    dtype=DataType.FLOAT_VECTOR,
-                    dim=len(vectors[0]),
-                ),
-            ]
-            collection = Collection(
-                name=collection_name,
-                schema=CollectionSchema(fields, description="Workspace chunk embeddings"),
-            )
-            collection.create_index(
-                field_name="vector",
-                index_params={
-                    "metric_type": "COSINE",
-                    "index_type": "IVF_FLAT",
-                    "params": {"nlist": min(128, max(1, len(nodes)))},
-                },
-            )
+            collection = cls.create_collection(collection_name, len(vectors[0]), {
+                "metric_type": "COSINE",
+                "index_type": "IVF_FLAT",
+                "params": {"nlist": min(128, max(1, len(nodes)))},
+            })
         else:
             collection = Collection(collection_name)
 

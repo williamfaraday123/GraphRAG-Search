@@ -1,81 +1,17 @@
-Instructions to run this:
-```
-cd query_processor
-python -m venv venv
-venv\Scripts\activate.bat
-pip install -r requirements.txt
-cd app
-python main.py
-```
+# Wiki snapshot
 
-File structure:
-```
-query-processor/
-├── app/
-│   ├── __init__.py
-│   ├── main.py            # FastAPI/gRPC Entry Point
-│   ├── retriever.py       # Milvus & Neo4j Logic
-│   ├── graph_engine.py    # LangGraph Pregel Engine: This is the brain. It implements the iterative refinement loop shown in diagrams/sequence.plantuml
-│   ├── models.py          # Pydantic & Data Models
-│   └── services/
-│       ├── milvus_client.py # Vector Retrieval
-│       └── neo4j_client.py # Graph Retrieval
-├── proto/
-│   └── query.proto        # gRPC Definition: Defines the contract between Spring Boot and the Query Processor.
-├── requirements.txt
-└── Dockerfile
+The wiki corpus is built once, offline, and shipped as a snapshot, because extracting its
+knowledge graph takes hours. This folder holds:
 
-```
-1. Request Arrival:
-    - Spring Boot sends a gRPC request StartProcessing with the user's question.
-    - The QueryProcessorServicer in main.py wakes up.
-2. Hybrid Retrieval (The "Gather" Phase):
-    - It calls MilvusService to find text chunks that semantically match the question (e.g., "How to deploy K8s?").
-    - It calls Neo4jService to find structured relationships (e.g., "K8s" -> "uses" -> "Etcd").
-    - It combines these into a raw list of facts.
-3. LangGraph Iteration (The "Think" Phase):
-    - The AgentState is created with these facts.
-    - Loop 1: The analyst node reads the facts. It might say, "We know how to install K8s, but we don't know the specific cloud provider constraints." Logic Check: Since it didn't say "CONVERGED", the graph loops back. (In a full implementation, this loop would trigger a new specific search. Here, it simulates the refinement logic).
-    - Loop 2: The analyst reviews again, decides the context is now rich enough, and outputs "CONVERGED".
-    - The graph exits the loop and moves to synthesizer.
-3. Synthesis & Streaming (The "Speak" Phase):
-    - The synthesizer node takes the refined context and asks the LLM (OpenAI) to write the final answer.
-    Instead of waiting for the whole text, the Python code splits the answer into words and yields them one by one over the gRPC stream.
-    - Spring Boot receives these chunks instantly and pushes them to the React UI via SSE, creating the "typewriter" effect.
+| Path | What it is |
+|---|---|
+| `raw_data/` | The WikiText files (`wiki.train.txt`, `wiki.valid.txt`, `wiki.test.txt`), the build's input |
+| `wiki_snapshot.py` | Exports the built wiki's Milvus collection and article texts; restores them on a new install |
+| `neo4j-load.sh` | Loads the Neo4j dump into an empty `neo4j_data` volume before Neo4j first starts |
+| `Dockerfile` | Image `graphrag-wiki-restore`: `wiki_snapshot.py` plus the exported vectors and texts |
+| `Dockerfile.neo4j` | Image `graphrag-wiki-neo4j`: the Neo4j image plus the dump and `neo4j-load.sh` |
+| `snapshot/` | Created by an export, not committed: `manifest.json`, `milvus.jsonl.gz`, `minio.jsonl.gz`, `neo4j.dump` |
 
-Start Docker Desktop — open it from the Start Menu and wait until the status shows green/"Running" in the system tray.
-
-MinIO needs to be running first. Start it from the project root:
-```
-cd C:\Users\estee\Desktop\reimagine-google-pagerank-search-for-generative-information-retrieval-2
-docker compose up minio -d
-```
-Then verify it's running
-```
-docker compose ps minio
-```
-
-Start Neo4j:
-```
-docker compose up neo4j -d
-```
-Verify it's up:
-```
-docker compose ps neo4j
-```
-
-Install ollama
-```
-ollama pull qwen3:4b-instruct
-```
-Go to Settings, toggle on 'Expose ollama to network'
-
-```
-cd ingestion_pipeline
-python -m venv venv
-venv\Scripts\activate.bat
-pip install -r requirements.txt
-python upload_to_minio.py # upload all .txt files from the raw_data folder into MinIO's rag-datasets bucket
-python main.py
-python index_to_milvus.py  # embed the Neo4j chunks into Milvus; search finds nothing without this
-```
+The build itself is `query_processor/app/build_wiki.py`: it indexes each article the same way
+as an uploaded file, then extracts its knowledge graph. See "Build the wiki snapshot" in the
+root [README](../README.md) for the commands.

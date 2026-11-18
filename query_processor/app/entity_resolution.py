@@ -80,19 +80,33 @@ def _unit(vectors):
 
 
 class _Workspace:
-    """Canonical entities of one workspace, in memory."""
+    """Canonical entities of one workspace, in memory. The vector matrix grows by doubling,
+    so adding stays cheap at the wiki's tens of thousands of entities."""
 
     def __init__(self):
         self.forms = {}       # normal form -> canonical key
-        self.keys = []        # canonical keys, aligned with heads / vectors
+        self.keys = []        # canonical keys, aligned with heads / vector rows
+        self.key_set = set()
         self.heads = []
-        self.vectors = None   # unit vectors of canonical names
+        self._matrix = None   # unit vectors of canonical names; rows [0, len(keys)) are used
+
+    @property
+    def vectors(self):
+        return None if self._matrix is None else self._matrix[:len(self.keys)]
 
     def add(self, key, name, vector):
         self.forms.setdefault(normal_form(name), key)
+        n = len(self.keys)
+        if self._matrix is None:
+            self._matrix = np.empty((64, vector.shape[1]), dtype=np.float32)
+        elif n == len(self._matrix):
+            grown = np.empty((2 * n, self._matrix.shape[1]), dtype=np.float32)
+            grown[:n] = self._matrix
+            self._matrix = grown
+        self._matrix[n] = vector[0]
         self.keys.append(key)
+        self.key_set.add(key)
         self.heads.append(head_word(name))
-        self.vectors = vector if self.vectors is None else np.vstack([self.vectors, vector])
 
     def match(self, name, vector):
         key = self.forms.get(normal_form(name))
@@ -144,9 +158,9 @@ class EntityResolver:
         with self._lock:
             ws = self._load(corpus_id)
             mapping = {}
-            fresh = [e for e in entities if e["key"] not in ws.keys]
+            fresh = [e for e in entities if e["key"] not in ws.key_set]
             for e in entities:
-                if e["key"] in ws.keys:
+                if e["key"] in ws.key_set:
                     mapping[e["key"]] = e["key"]
             if fresh:
                 vectors = _unit(self.embed([e["name"] for e in fresh]))

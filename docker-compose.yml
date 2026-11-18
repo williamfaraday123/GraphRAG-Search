@@ -29,9 +29,9 @@ services:
     networks:
       - ai-net
 
-  # 2. Neo4j (Graph DB)
+  # 2. Neo4j (Graph DB). Pinned: the wiki snapshot's dump loads only into this version or later.
   neo4j:
-    image: neo4j:5
+    image: neo4j:5.26
     container_name: neo4j
     environment:
       - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-password123}
@@ -42,6 +42,11 @@ services:
     ports:
       - "7474:7474"
       - "7687:7687"
+    depends_on:
+      # Only with --profile wiki; required: false lets Neo4j start without it
+      wiki-neo4j-load:
+        condition: service_completed_successfully
+        required: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-password123}", "RETURN 1"]
@@ -97,41 +102,43 @@ services:
   # Application Layer
   # ============================================
 
-  # 5. Ingestion Pipeline (one-shot job)
-  ingestion_pipeline:
-    # Tag used by `docker compose build` and pushed to Docker Hub (docker-compose.hub.yml pulls it)
-    image: ${DOCKERHUB_USER:-graphrag}/graphrag-ingestion:${TAG:-latest}
+  # 5. Wiki snapshot (one-shot jobs, profile "wiki"). The wiki is built offline
+  #    (docker-compose.wiki-build.yml) and shipped in these two images; see the README.
+  #    They only fill empty stores, so on this machine they leave existing data alone.
+  #    Build and push: docker compose --profile wiki build wiki-neo4j-load wiki-restore
+  wiki-neo4j-load:
+    profiles: ["wiki"]
+    image: ${DOCKERHUB_USER:-graphrag}/graphrag-wiki-neo4j:${TAG:-latest}
     build:
       context: ./ingestion_pipeline
-      dockerfile: Dockerfile.render
-    container_name: ai-ingestion
+      dockerfile: Dockerfile.neo4j
+    container_name: wiki-neo4j-load
+    volumes:
+      - neo4j_data:/data
+
+  wiki-restore:
+    profiles: ["wiki"]
+    image: ${DOCKERHUB_USER:-graphrag}/graphrag-wiki-restore:${TAG:-latest}
+    build:
+      context: ./ingestion_pipeline
+    container_name: wiki-restore
     env_file:
       - .env
     environment:
       - MINIO_ENDPOINT=http://minio:9000
-      - NEO4J_URI=bolt://neo4j:7687
       - MILVUS_HOST=milvus-standalone
-      # .env holds host-side values (localhost); containers reach host Ollama via host.docker.internal
-      - EDGE_MODEL_BASE_URL=${DOCKER_EDGE_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
-      - HF_HOME=/app/.cache/huggingface
-      - HF_HUB_DISABLE_XET=1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ./ingestion_pipeline/raw_data:/app/raw_data
-      - hf_cache:/app/.cache/huggingface
+      - MILVUS_PORT=19530
     depends_on:
       milvus-standalone:
-        condition: service_started
-      neo4j:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
     networks:
       - ai-net
 
-  # 6. Query Processor (gRPC API)
+  # 6. Query Processor (gRPC API; also runs build_wiki.py in docker-compose.wiki-build.yml)
   query_processor:
+    # Tag used by `docker compose build` and pushed to Docker Hub (docker-compose.hub.yml pulls it)
     image: ${DOCKERHUB_USER:-graphrag}/graphrag-query-processor:${TAG:-latest}
     build:
       context: ./query_processor

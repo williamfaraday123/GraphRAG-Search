@@ -13,6 +13,8 @@ ingestion_pipeline/torch_cache/
 ingestion_pipeline/wheel_cache/
 ingestion_pipeline/$null
 ingestion_pipeline/proto/
+# Wiki snapshot export (shipped in the graphrag-wiki-* images, not in git)
+ingestion_pipeline/snapshot/
 
 volumes/
 

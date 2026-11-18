@@ -5,7 +5,8 @@
 # On another device, rename this file to docker-compose.yml, or pass it with -f:
 #   docker compose -f docker-compose.hub.yml up -d
 # Everything runs in containers, including the LLM (Ollama); the models in .env are pulled
-# automatically on first start. Then open http://localhost:8080
+# automatically on first start, and the pre-built wiki (with its knowledge graph) is
+# restored from the snapshot images. Then open http://localhost:8080
 # ============================================
 
 services:
@@ -38,8 +39,9 @@ services:
     networks:
       - ai-net
 
+  # Pinned: the wiki snapshot's dump loads only into this Neo4j version or a later one
   neo4j:
-    image: neo4j:5
+    image: neo4j:5.26
     container_name: neo4j
     environment:
       - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-password123}
@@ -50,6 +52,9 @@ services:
     ports:
       - "7474:7474"
       - "7687:7687"
+    depends_on:
+      wiki-neo4j-load:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-password123}", "RETURN 1"]
@@ -147,32 +152,30 @@ services:
   # Application Layer (pulled from Docker Hub)
   # ============================================
 
-  # One-shot job: builds the wiki corpus from the data baked into the image
-  ingestion_pipeline:
-    image: ${DOCKERHUB_USER:?Set DOCKERHUB_USER in .env}/graphrag-ingestion:${TAG:-latest}
-    container_name: ai-ingestion
+  # One-shot jobs: the pre-built wiki (knowledge graph included), restored on first start.
+  # Both only fill empty stores and exit at once on later starts.
+  # Loads the graph dump into the empty neo4j_data volume before Neo4j starts
+  wiki-neo4j-load:
+    image: ${DOCKERHUB_USER:?Set DOCKERHUB_USER in .env}/graphrag-wiki-neo4j:${TAG:-latest}
+    container_name: wiki-neo4j-load
+    volumes:
+      - neo4j_data:/data
+
+  # Restores the wiki's vectors (Milvus) and article texts (MinIO)
+  wiki-restore:
+    image: ${DOCKERHUB_USER:?Set DOCKERHUB_USER in .env}/graphrag-wiki-restore:${TAG:-latest}
+    container_name: wiki-restore
     env_file:
       - .env
     environment:
       - MINIO_ENDPOINT=http://minio:9000
-      - NEO4J_URI=bolt://neo4j:7687
       - MILVUS_HOST=milvus-standalone
-      - EDGE_MODEL_BASE_URL=${DOCKER_EDGE_MODEL_BASE_URL:-http://ollama:11434/v1}
-      - HF_HOME=/app/.cache/huggingface
-      - HF_HUB_DISABLE_XET=1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - hf_cache:/app/.cache/huggingface
+      - MILVUS_PORT=19530
     depends_on:
-      ollama-pull:
-        condition: service_completed_successfully
       milvus-standalone:
-        condition: service_started
-      neo4j:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
     networks:
       - ai-net
 

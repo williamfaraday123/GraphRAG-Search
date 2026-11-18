@@ -241,6 +241,19 @@ def make_retrieve_context_node(retriever: HybridRetriever):
             if first_round:
                 question_entities += [k for k in result.get("named_keys", []) if k not in question_entities]
 
+        # Paths that join the question's parts: sub-queries each walk from their own entities,
+        # so a chain from one part to another ("learned from Hollywood" ... "flooded the
+        # markets") is only found by searching from all the question's entities together
+        connect = getattr(retriever, "connect_question", None)
+        if first_round and connect and len(question_entities) >= 2:
+            joined = connect(state["query"], state.get("corpus_id") or "wiki", question_entities,
+                             file_ids=state.get("file_ids") or None,
+                             known_chunk_ids=[c.get("id") for c in new_chunks], top_k=state.get("top_k") or 5)
+            for c in new_chunks:
+                c["kg_score"] = max(c.get("kg_score", 0.0), joined["chunk_scores"].get(c.get("id"), 0.0))
+            new_chunks.extend(joined["chunks"])
+            new_paths = joined["paths"] + new_paths
+
         all_chunks = _merge_chunks(state.get("all_chunks", []), new_chunks)
         all_relations = _merge_relations(state.get("all_relations", []), new_relations)
         kg_paths = _merge_paths(state.get("kg_paths") or [], new_paths)
@@ -300,11 +313,11 @@ def make_retrieve_context_node(retriever: HybridRetriever):
     return retrieve_context
 
 def graph_coverage_analysis(state: AgentState, coverage):
-    """Coverage check for upload workspaces whose question names entities in the knowledge
-    graph (coverage.py): no model call. Returns None when it can't decide, so the model does."""
+    """Coverage check for questions that name entities in the knowledge graph (coverage.py):
+    no model call. Returns None when it can't decide, so the model does."""
     corpus_id = state.get("corpus_id") or "wiki"
     keys = state.get("question_entities") or []
-    if corpus_id == "wiki" or not keys or coverage is None:
+    if not keys or coverage is None:
         return None
     file_ids = state.get("file_ids") or None
     try:
@@ -463,7 +476,9 @@ def format_kg_facts(paths: List[dict]) -> str:
     lines = []
     for p in paths:
         steps = [f"{f['source_label']} {f['relation']} {f['target_label']} [{f['filename']}]" for f in p["facts"]]
-        lines.append("- " + " → then: ".join(steps))
+        # A path joining two parts of the question: say which, so the model reads it as one chain
+        head = f"Chain linking \"{p['links'][0]}\" and \"{p['links'][1]}\": " if p.get("links") else ""
+        lines.append("- " + head + " → then: ".join(steps))
     return "\n".join(lines)
 
 
@@ -673,7 +688,92 @@ def enforce_every_file(answer: str, options, chunks: List[dict], files: List[str
     return _ANSWER_LINE.sub(fix_answer, answer, count=1)
 
 
-def _open_prompt(query, context_text) -> str:
+# "the country which flooded ...", "a company that ...": the question describes something
+# without naming it, so the answer depends on working that out first
+_DESCRIBED = re.compile(r"\b(?:the|a|an)\s+(?:[a-z'’-]+\s+){0,2}(?:which|that|who|whose|where)\s+\w+", re.I)
+_STEP = re.compile(r"^\s*STEP:\s*(.+?)\s*=>\s*(.+?)\s*$", re.M)
+_STEP_QUOTE = re.compile(r"[\"“]([^\"”\n]+)[\"”]")
+_RESULT = re.compile(r"^\s*RESULT:\s*(.+?)\s*$", re.M)
+
+
+def needs_steps(state) -> bool:
+    """Multi-part open questions: the question describes something without naming it, or the
+    knowledge graph found a chain joining its parts. A one-pass answer to these often skips a
+    step ("the US contributed to the US film industry")."""
+    return bool(_DESCRIBED.search(state["query"]) or any(p.get("links") for p in answer_paths(state)))
+
+
+def _steps_prompt(query, context_text) -> str:
+    # The example is about another topic on purpose: small models copy examples taken from the task
+    return f"""Work out the query below step by step, using only the context. The query may describe
+things without naming them (e.g. "the city whose port closed") and set conditions on the answer.
+
+Write one STEP line for each description or condition in the query, in the order needed to answer it.
+Every verb in the query that links the answer to something ("supplied", "contribute to", "was
+founded by") is a condition and needs its own STEP, with the sentence that states that link. A link
+may be stated from the other side: "the mill bought its wool from the hill farms" states that the hill
+farms supplied the mill. Do not reuse a sentence for a step it does not state:
+STEP: <the description or condition, in the query's words> => <what the context says it is, in a few words> | "<exact sentence from the context>" [file name]
+If no sentence in the context states it, write: STEP: <the description or condition> => not stated
+Then one line: RESULT: <the answer the steps lead to, in a few words, or "not stated">
+
+For example (a different topic), for "Which towns that grew by trading with it supplied the city whose port closed in 1900?":
+STEP: the city whose port closed in 1900 => Lowport | "Lowport's port closed in 1900." [history.pdf]
+STEP: towns that grew by trading with Lowport => the river towns | "The river towns grew by trading with Lowport." [history.pdf]
+STEP: towns that supplied Lowport => the river towns | "Lowport bought its grain from the river towns." [trade.docx]
+RESULT: the river towns
+
+Name only what a sentence says. If the context names a group but not its members, the answer is the
+group: do not list members the context does not tie to every condition. Write nothing else.
+
+Query: {query}
+
+Context:
+{context_text}"""
+
+
+def work_out_steps(query, context_text, chunks) -> str:
+    """Runs the steps prompt and keeps only steps whose quoted sentence is really in the context
+    (or that say 'not stated'). The RESULT line is kept only when no step was dropped."""
+    llm = chat_client("ANSWER_MODEL", temperature=0)
+    raw = llm.invoke([HumanMessage(content=_steps_prompt(query, context_text))]).content
+    words = _words(" ".join(c.get("content") or "" for c in chunks))
+    trigrams = {tuple(words[i:i + 3]) for i in range(len(words) - 2)}
+
+    kept, dropped = [], 0
+    for m in _STEP.finditer(raw):
+        what, found = m.group(1), m.group(2)
+        quotes = _STEP_QUOTE.findall(found)
+        if found.lower().startswith("not stated") or (quotes and all(_quote_in(q, trigrams) for q in quotes)):
+            kept.append(f"- {what} => {found}")
+        else:
+            dropped += 1
+    result = _RESULT.search(raw)
+    if kept and result and not dropped:
+        kept.append(f"Result: {result.group(1)}")
+    logger.info("Answer steps: %d kept, %d dropped (quote not in the context)", len(kept), dropped)
+    return "\n".join(kept)
+
+
+def _open_prompt(query, context_text, steps="") -> str:
+    if steps:
+        # Multi-part question: answer from the checked steps instead of in one pass
+        return f"""Answer the query using only the context below. The context is grouped by file under
+headings like "=== File 1: report.pdf ==="; cite a file by its name only, e.g. [report.pdf].
+
+The query was worked out step by step first; each step's quoted sentence was checked against the files:
+{steps}
+
+Answer the query from these steps in one to three sentences, with the key terms in **bold** and the
+[file name] after each claim. Say what each described thing is (e.g. which country) and give the
+answer the steps lead to. Use only what the steps and their sentences say: never apply a condition from
+the query to something no sentence ties it to, and if the steps say "not stated", say the files don't
+state it. Reply in Markdown with no headings and no list of citations.
+
+Query: {query}
+
+Context:
+{context_text}"""
     # One sentence per point the context makes, and stop. Tried and dropped: a quoted-evidence
     # section first (the answer then retold every quote, relevant or not), and "at most 3
     # sentences" (the model fills the budget with invented cause-and-effect links). Asked "How
@@ -855,10 +955,20 @@ def synthesize_answer(state: AgentState):
         display_name((c.get("source") or "Unknown").rsplit("/", 1)[-1]) for c in state["refined_context"]
     ))
     options = listed_options(state["query"])
+    note = []
     if options:
         prompt = _options_prompt(state["query"], context_text, options, files)
     else:
-        prompt = _open_prompt(state["query"], context_text)
+        steps = ""
+        if needs_steps(state):
+            try:
+                steps = work_out_steps(state["query"], context_text, state["refined_context"])
+            except Exception:
+                logger.exception("Working out the answer steps failed; answering in one pass")
+            n = steps.count("\n- ") + steps.startswith("- ")
+            note = [f"Synthesizer: worked the question out in {n} checked step(s) before answering"
+                    if steps else "Synthesizer: no step of the question could be checked against the files"]
+        prompt = _open_prompt(state["query"], context_text, steps)
 
     messages = [HumanMessage(content=prompt)]
     if state.get("corpus_id") and state["corpus_id"] != "wiki":
@@ -876,7 +986,7 @@ def synthesize_answer(state: AgentState):
         answer = restore_option_labels(answer, options)
         if _ALL_FILES.search(state["query"]) and len(files) > 1:
             answer = enforce_every_file(answer, options, state["refined_context"], files)
-    return {"final_answer": answer}
+    return {"final_answer": answer, **({"messages": note} if note else {})}
 
 # --- Graph Construction ---
 
