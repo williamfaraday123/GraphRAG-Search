@@ -17,6 +17,7 @@ from pymilvus import (
 )
 from neo4j import GraphDatabase
 
+from chunk_context import chunk_sections, embed_text, make_header
 from corpus_map import build_corpus_map
 from knowledge_graph import delete_file_entities, load_graph
 from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, normalize_file_id
@@ -36,6 +37,12 @@ logger = logging.getLogger(__name__)
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_CHUNKS_PER_FILE = 500
 MAX_MAP_CHUNKS = 600  # keeps the corpus map responsive on CPU
+
+
+def document_title(filename):
+    """'sample.docx' -> 'sample' (stored names add '.txt' to non-text uploads)."""
+    name = display_name(filename)
+    return name.rsplit(".", 1)[0] if "." in name else name
 
 
 class CorpusIndexer:
@@ -110,6 +117,8 @@ class CorpusIndexer:
         if not chunks_text:
             raise ValueError("No searchable text was found in the file")
 
+        title = document_title(filename)
+        sections = chunk_sections(text, chunks_text)
         nodes = [
             {
                 "chunk_id": f"{file_id}:{index}",
@@ -119,8 +128,13 @@ class CorpusIndexer:
                 "total_chunks": len(chunks_text),
                 "corpus_id": corpus_id,
                 "file_id": file_id,
+                # Embedded in front of the chunk (chunk_context.py); entity names are added
+                # once the knowledge graph has extracted the file (refresh_vectors)
+                "doc_title": title,
+                "section": section,
+                "context_header": make_header(title, section),
             }
-            for index, chunk in enumerate(chunks_text)
+            for index, (chunk, section) in enumerate(zip(chunks_text, sections))
         ]
         edges = [
             {
@@ -134,7 +148,8 @@ class CorpusIndexer:
         ]
 
         try:
-            vectors = self.embedding_service.generate_batch_embeddings(chunks_text)
+            vectors = self.embedding_service.generate_batch_embeddings(
+                [embed_text(n["content"], n["context_header"]) for n in nodes])
             self._write_graph(nodes, edges)
             self._write_vectors(
                 collection_for_corpus(corpus_id), nodes, vectors
@@ -152,6 +167,64 @@ class CorpusIndexer:
             raise
 
         return {"file_id": file_id, "filename": filename, "chunk_count": len(nodes)}
+
+    def refresh_vectors(self, corpus_id: str, file_id: str):
+        """Re-embeds a file's chunks with the entities the knowledge graph found in each
+        (names first, then the most connected), after extraction. The new vectors are
+        inserted before the old ones are deleted, so a search never finds the file missing.
+        Returns the number of chunks re-embedded."""
+        corpus_id = normalize_corpus_id(corpus_id)
+        file_id = normalize_file_id(file_id)
+        with self.neo4j_driver.session() as session:
+            rows = session.run(
+                """
+                MATCH (c:Chunk {corpus_id: $corpus_id, file_id: $file_id})
+                OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity)
+                OPTIONAL MATCH (e)-[f:FACT {chunk_id: c.chunk_id}]-()
+                WITH c, e, count(f) AS facts
+                ORDER BY c.chunk_index, CASE e.kind WHEN 'name' THEN 0 ELSE 1 END, facts DESC, e.name
+                RETURN c.chunk_id AS chunk_id, c.content AS content, c.source AS source,
+                       c.doc_title AS title, c.section AS section,
+                       [n IN collect(e.name) WHERE n IS NOT NULL] AS entities
+                ORDER BY c.chunk_index
+                """,
+                corpus_id=corpus_id, file_id=file_id,
+            ).data()
+        rows = [r for r in rows if r.get("content")]
+        if not rows:
+            return 0
+        for r in rows:
+            r["header"] = make_header(r["title"], r["section"] or "", r["entities"])
+        vectors = self.embedding_service.generate_batch_embeddings(
+            [embed_text(r["content"], r["header"]) for r in rows])
+
+        self._connect_milvus()
+        collection_name = collection_for_corpus(corpus_id)
+        if not utility.has_collection(collection_name):
+            return 0
+        collection = Collection(collection_name)
+        collection.load()
+        old_ids = [r["id"] for r in collection.query(
+            expr=file_filter_expr([file_id]), output_fields=["id"])]
+        collection.insert([
+            [r["chunk_id"] for r in rows],
+            [r["content"] for r in rows],
+            [r["source"] for r in rows],
+            vectors,
+        ])
+        collection.flush()
+        if old_ids:
+            collection.delete(f"id in {old_ids}")
+            collection.flush()
+        with self.neo4j_driver.session() as session:
+            session.run(
+                """
+                UNWIND $rows AS r
+                MATCH (c:Chunk {chunk_id: r.chunk_id}) SET c.context_header = r.header
+                """,
+                rows=[{"chunk_id": r["chunk_id"], "header": r["header"]} for r in rows],
+            ).consume()
+        return len(rows)
 
     def list_files(self, corpus_id: str):
         self._ensure_bucket()
@@ -300,7 +373,10 @@ class CorpusIndexer:
             c.chunk_index = node.chunk_index,
             c.total_chunks = node.total_chunks,
             c.corpus_id = node.corpus_id,
-            c.file_id = node.file_id
+            c.file_id = node.file_id,
+            c.doc_title = node.doc_title,
+            c.section = node.section,
+            c.context_header = node.context_header
         """
         with self.neo4j_driver.session() as session:
             session.run(upsert_nodes, nodes=nodes).consume()

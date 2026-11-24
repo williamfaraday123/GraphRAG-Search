@@ -58,7 +58,10 @@ class QueryProcessorServicer:
         self.entity_resolver = EntityResolver(
             self.corpus_indexer.neo4j_driver, self.retriever.embedding_service.generate_batch_embeddings
         )
-        self.kg_builder = KnowledgeGraphBuilder(self.corpus_indexer.neo4j_driver, resolver=self.entity_resolver)
+        self.kg_builder = KnowledgeGraphBuilder(
+            self.corpus_indexer.neo4j_driver, resolver=self.entity_resolver,
+            on_file_done=self.corpus_indexer.refresh_vectors,
+        )
 
     def StartProcessing(self, request, context) -> Iterator[SearchResponse]:
         # Knowledge-graph extraction pauses between chunks while a search is running,

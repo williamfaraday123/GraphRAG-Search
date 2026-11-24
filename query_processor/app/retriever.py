@@ -5,6 +5,7 @@ from services.object_storage_client import ObjectStorageRetriever
 from embedding import EmbeddingService
 from corpus import collection_for_corpus, file_filter_expr, normalize_corpus_id, WIKI_CORPUS_ID
 from graph_retrieval import GraphRetriever
+from chunk_context import embed_text
 from file_similarity import FileSimilarity
 from local_ppr import LocalPPR, chunk_node, entity_node
 from coverage import CoverageCheck
@@ -224,7 +225,8 @@ class HybridRetriever:
         if new_ids:
             rows = [r for r in self.graph_retriever._load_chunks(new_ids) if r.get("content")]
             if rows:
-                vectors = self.embedding_service.generate_batch_embeddings([r["content"] for r in rows])
+                vectors = self.embedding_service.generate_batch_embeddings(
+                    [embed_text(r["content"], r.get("header")) for r in rows])
                 q = np.asarray(query_vector, dtype=np.float32)
                 q /= np.linalg.norm(q) + 1e-9
                 for row, vec in zip(rows, vectors):

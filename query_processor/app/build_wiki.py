@@ -216,7 +216,8 @@ def main():
 
     # 2. Knowledge graph, sentence by sentence (slow: roughly 4 s per sentence on a CPU)
     builder = KnowledgeGraphBuilder(
-        driver, resolver=EntityResolver(driver, embedding.generate_batch_embeddings), background=False
+        driver, resolver=EntityResolver(driver, embedding.generate_batch_embeddings), background=False,
+        on_file_done=indexer.refresh_vectors,
     )
     if builder.enabled:
         check_model()

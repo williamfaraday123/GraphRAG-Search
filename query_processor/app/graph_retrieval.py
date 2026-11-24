@@ -35,6 +35,7 @@ import itertools
 import logging
 import numpy as np
 
+from chunk_context import embed_text
 from document_text import display_name
 from knowledge_graph import _WORD, _content_words, _word_matches
 
@@ -382,7 +383,10 @@ class GraphRetriever:
         if new_ids:
             rows = [r for r in self._load_chunks(new_ids) if r.get("content")]
             if rows:
-                sims = _unit(self.embedding_service.generate_batch_embeddings([r["content"] for r in rows])) @ _unit(query_vector)
+                # Embedded as Milvus stored them (with the context header), so the scores
+                # compare with vector hits
+                sims = _unit(self.embedding_service.generate_batch_embeddings(
+                    [embed_text(r["content"], r.get("header")) for r in rows])) @ _unit(query_vector)
                 for row, sim in zip(rows, sims.tolist()):
                     out.append({
                         "id": row["id"], "content": row["content"], "source": row["source"],
@@ -396,7 +400,8 @@ class GraphRetriever:
             return session.run(
                 """
                 MATCH (c:Chunk) WHERE c.chunk_id IN $ids
-                RETURN c.chunk_id AS id, c.content AS content, c.source AS source
+                RETURN c.chunk_id AS id, c.content AS content, c.source AS source,
+                       c.context_header AS header
                 """,
                 ids=list(chunk_ids),
             ).data()

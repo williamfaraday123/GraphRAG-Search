@@ -47,8 +47,8 @@ The system turns source documents into a searchable knowledge base, then combine
 Uploads and wiki articles are indexed by the same code (`CorpusIndexer.index_text`, then `KnowledgeGraphBuilder.process_file`):
 
 1. Split the text into chunks with ids `<file_id>:<index>`, and link consecutive chunks with `NEXT_CHUNK`.
-2. Embed the chunks with `all-MiniLM-L6-v2` and write them to Neo4j and the corpus's Milvus collection; store the text in MinIO.
-3. Extract facts sentence by sentence with `KG_MODEL`, keep those whose subject and object both appear in the sentence, merge entities that name the same concept, and write `Entity` nodes with `MENTIONS` and `FACT` relationships.
+2. Embed the chunks with `all-MiniLM-L6-v2` and write them to Neo4j and the corpus's Milvus collection; store the text in MinIO. Each vector is computed from the chunk with a short header in front (`Document: sample | Section: …`, from the file name and the nearest heading; `chunk_context.py`). The stored text has no header.
+3. Extract facts sentence by sentence with `KG_MODEL`, showing the two sentences before each one so the model can resolve "it" and "they". Keep facts whose subject and object both appear in the sentence; when the sentence has a pronoun, one end may instead be a name from those earlier sentences, as long as the relation is in the sentence. Merge entities that name the same concept, and write `Entity` nodes with `MENTIONS` and `FACT` relationships. When a file is done, re-embed its chunks with the names of the entities each one mentions added to the header (`CorpusIndexer.refresh_vectors`).
 
 Uploads run steps 1–2 during the upload request and step 3 in a background thread. The wiki runs all three offline in `build_wiki.py`, because step 3 takes hours, and is shipped as a snapshot:
 
@@ -147,6 +147,7 @@ Within Docker Compose, services communicate over the `ai-net` network using serv
 | `query_processor/app/build_wiki.py` | Offline wiki build: WikiText articles indexed and extracted like uploads |
 | `ingestion_pipeline/wiki_snapshot.py`, `neo4j-load.sh` | Wiki snapshot export and restore |
 | `query_processor/app/corpus_indexer.py` | Chunking, embedding and storage for uploads and wiki articles |
+| `query_processor/app/chunk_context.py` | Context headers (document, section, entities) embedded in front of each chunk |
 | `query_processor/app/knowledge_graph.py` | Sentence-by-sentence fact extraction |
 | `query_processor/app/graph_retrieval.py` | Knowledge-graph fact paths from the entities a question names |
 | `query_processor/app/main.py` | gRPC server and streamed responses |

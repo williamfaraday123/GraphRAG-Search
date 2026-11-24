@@ -5,10 +5,17 @@ After a file is indexed, a background worker sends each sentence of each chunk t
 small local model (Ollama, KG_MODEL, default qwen2.5:1.5b) and asks for the facts it
 states as (subject, relation, object) triples. One sentence per call: on whole chunks a
 1.5B model often loops, leaves objects empty or mixes facts from different sentences.
+The two sentences before it are shown as context only, so the model can replace "it"
+or "they" with the name they stand for.
 
 Each triple is checked against its sentence before it is kept: the words of subject and
 object must appear in that sentence, which is stored as the fact's evidence. That removes
-most invented facts and facts carried over from the previous sentence.
+most invented facts and facts carried over from earlier sentences. The one exception is
+a pronoun: when the sentence has one, one end may be a name from the context instead, as
+long as the other end and the relation are in the sentence.
+
+When a file is done, on_file_done re-embeds its chunks with the entity names they mention
+(chunk_context.py).
 
 Stored in Neo4j next to the existing chunk graph:
   (:Entity {corpus_id, key, name, kind})          kind: "name" (capitalised) or "concept"
@@ -46,12 +53,16 @@ logger = logging.getLogger(__name__)
 
 MAX_FACTS_PER_SENTENCE = 3
 MIN_SENTENCE_WORDS = 4
+CONTEXT_SENTENCES = 2     # earlier sentences shown with each one, to resolve pronouns
+MAX_CONTEXT_CHARS = 400
 REQUEST_TIMEOUT_SECONDS = 120
 RETRY_DELAY_SECONDS = 60  # after Ollama is unreachable
 
+# The fixed instructions come first and the changing text last, so Ollama can reuse the
+# instructions' processed prefix from the previous call instead of reading them again.
+# The sentence comes before the earlier text: with the earlier text first, the 1.5B model
+# took more facts from it and fewer from the sentence.
 PROMPT = """Extract the facts stated in this sentence.
-
-Sentence: "{sentence}"
 
 For each fact give:
 - subject: who or what the fact is about (a short noun phrase from the sentence)
@@ -60,8 +71,11 @@ For each fact give:
 
 Keep verbs in the relation, not in the subject or object: for "the town grew by trading with Venice",
 the object is "Venice" and the relation is "grew by trading with".
-Give at most 3 facts. Resolve "it", "they", "their" to the noun they refer to, using this earlier text if needed: "{previous}"
-Return {{"facts": []}} if the sentence states no fact."""
+Give at most 3 facts. Return {{"facts": []}} if the sentence states no fact.
+
+Sentence: "{sentence}"
+
+If the sentence says "it", "they", "their", "this", "he" or "she", replace it with the name it refers to in this earlier text. Do not take facts from the earlier text: "{previous}\""""
 
 SCHEMA = {
     "type": "object",
@@ -97,6 +111,11 @@ GENERIC = {
     "film", "films", "cinema", "movie", "movies", "people", "world", "time", "thing", "things",
     "it", "its", "they", "them", "their", "he", "she", "his", "her", "we", "us", "you", "one",
     "others", "something", "position", "event", "situation",
+}
+# A sentence with one of these may name an entity from the earlier text ("It grew rich")
+REFERRING_WORDS = {
+    "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
+    "he", "him", "his", "she", "her", "this", "these", "those",
 }
 MINOR_WORDS = DETERMINERS | LEADING_PREPOSITIONS | {
     "and", "or", "is", "are", "was", "were", "be", "new", "own", "which", "who", "whose",
@@ -212,9 +231,17 @@ def entity_kind(name):
     return "name" if any(w[:1].isupper() for w in name.split()) else "concept"
 
 
-def validate_facts(sentence, raw_facts):
-    """Turns raw model triples for one sentence into checked facts and their entities."""
-    sentence_words = {w.lower().replace("’", "'") for w in _WORD.findall(sentence)}
+def _words_of(text):
+    return {w.lower().replace("’", "'") for w in _WORD.findall(text or "")}
+
+
+def validate_facts(sentence, raw_facts, context=""):
+    """Turns raw model triples for one sentence into checked facts and their entities.
+    context: the earlier sentences the model was shown. One end of a fact may come from
+    there instead of the sentence, when the sentence has a pronoun it can stand for
+    ("It grew rich" -> Venice); the other end must be in the sentence."""
+    sentence_words = _words_of(sentence)
+    context_words = _words_of(context) if sentence_words & REFERRING_WORDS else set()
     evidence = " ".join(sentence.split())
     entities, facts, seen = {}, [], set()
     for raw in raw_facts[:MAX_FACTS_PER_SENTENCE]:
@@ -237,10 +264,16 @@ def validate_facts(sentence, raw_facts):
                 # Self-loops and near-self-loops ("audiences" -> "popular audiences")
                 if a == b or re.search(rf"\b{re.escape(a)}\b", b) or re.search(rf"\b{re.escape(b)}\b", a):
                     continue
-                # Both ends must come from this sentence: drops invented objects and facts
-                # the model carried over from the previous sentence
-                if not (_in_sentence(subject, sentence_words) and _in_sentence(obj, sentence_words)):
-                    continue
+                # Both ends must come from this sentence (drops invented objects and facts
+                # carried over from earlier text), except one end standing for a pronoun
+                subject_here, object_here = _in_sentence(subject, sentence_words), _in_sentence(obj, sentence_words)
+                if not (subject_here and object_here):
+                    # The relation must still be this sentence's: a whole fact copied from
+                    # the earlier text has its relation there, not here
+                    resolved = obj if subject_here else subject
+                    if not ((subject_here or object_here) and _in_sentence(resolved, context_words)
+                            and _in_sentence(relation, sentence_words)):
+                        continue
                 rel = relation[0].lower() + relation[1:]
                 if (a, b) in seen:
                     continue  # one fact per pair per sentence ("appealed because" / "appealed because of")
@@ -255,17 +288,29 @@ def _squash(text):
     return " ".join(text.split()).lower()
 
 
+def _context_text(sentences):
+    """The earlier sentences shown with a sentence, cut to MAX_CONTEXT_CHARS at a word."""
+    text = " ".join(" ".join(s.split()) for s in sentences)
+    if len(text) > MAX_CONTEXT_CHARS:
+        text = text[-MAX_CONTEXT_CHARS:]
+        text = text[text.find(" ") + 1:]
+    return text
+
+
 def chunk_sentences(content, previous_content=""):
-    """Sentences worth sending to the model: skips fragments and sentences repeated from
-    the previous chunk's overlap (they were already processed there)."""
+    """[(sentence, earlier text)] for the sentences worth sending to the model. Skips
+    fragments and sentences repeated from the previous chunk's overlap (they were already
+    processed there). The earlier text is the CONTEXT_SENTENCES sentences before each one,
+    reaching back into the previous chunk, so the model can resolve "it" and "they"."""
     prior = _squash(previous_content)
+    context = split_sentences(previous_content)[-CONTEXT_SENTENCES:] if prior else []
     out = []
     for sentence in split_sentences(content):
-        if len(_WORD.findall(sentence)) < MIN_SENTENCE_WORDS:
-            continue
         if prior and _squash(sentence).rstrip(".!?\"' ") in prior:
-            continue
-        out.append(sentence)
+            continue  # already in the context: the previous chunk ends with it
+        if len(_WORD.findall(sentence)) >= MIN_SENTENCE_WORDS:
+            out.append((sentence, _context_text(context)))
+        context = (context + [sentence])[-CONTEXT_SENTENCES:]
     return out
 
 
@@ -275,13 +320,11 @@ def extract_chunk(content, previous_content="", call_model=None):
     passes one that yields to searches)."""
     call = call_model or extract_facts
     entities, facts = {}, []
-    previous = previous_content.strip()[-300:]
-    for sentence in chunk_sentences(content, previous_content):
-        found_entities, found_facts = validate_facts(sentence, call(sentence, previous))
+    for sentence, earlier in chunk_sentences(content, previous_content):
+        found_entities, found_facts = validate_facts(sentence, call(sentence, earlier), context=earlier)
         for entity in found_entities:
             entities.setdefault(entity["key"], entity)
         facts.extend(found_facts)
-        previous = sentence
     return list(entities.values()), facts
 
 
@@ -356,13 +399,16 @@ def _close_now(connection):
             pass
 
 class KnowledgeGraphBuilder:
-    def __init__(self, neo4j_driver, resolver=None, background=True):
+    def __init__(self, neo4j_driver, resolver=None, background=True, on_file_done=None):
         """resolver: entity_resolution.EntityResolver; entities that name the same concept as
         an existing one are written onto that entity instead of a new node.
         background=False: no worker thread; the caller runs process_file itself
-        (build_wiki.py builds the wiki corpus this way, offline)."""
+        (build_wiki.py builds the wiki corpus this way, offline).
+        on_file_done(corpus_id, file_id): runs after a file's chunks are all extracted
+        (CorpusIndexer.refresh_vectors re-embeds them with their entity names)."""
         self.driver = neo4j_driver
         self.resolver = resolver
+        self.on_file_done = on_file_done
         self.enabled = os.getenv("KG_ENABLED", "true").lower() not in {"0", "false", "no"}
         self._queue = queue.Queue()
         self._queued = set()
@@ -551,6 +597,12 @@ class KnowledgeGraphBuilder:
         logger.info(
             "Knowledge graph: file %s done, %d fact(s) in %.0fs", file_id, total_facts, time.time() - started
         )
+        if self.on_file_done is not None:
+            try:
+                self.on_file_done(corpus_id, file_id)
+            except Exception:
+                # The file keeps its document/section-header vectors; search still works
+                logger.exception("Re-embedding file %s with its entities failed", file_id)
         return total_facts
 
     def _mark(self, chunk_id, status):
