@@ -60,12 +60,25 @@ button, input { font: inherit; }
 
 :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
-/* --- Layout --- */
+/* --- Layout: a scrolling chat above a question box fixed to the bottom --- */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+}
+
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .app-container {
   max-width: 1180px;
   margin: 0 auto;
-  padding: 40px 24px 80px;
-  min-height: 100vh;
+  padding: 40px 24px 32px;
 }
 
 /* Header, upload, search and progress stay at reading width; results can use the full width */
@@ -253,25 +266,98 @@ button, input { font: inherit; }
   color: var(--text);
 }
 
-/* --- Search bar --- */
-.search-form { margin-bottom: 20px; }
+/* --- Conversation thread --- */
+.thread { display: flex; flex-direction: column; }
+.thread-item, .thread-divider { scroll-margin-top: 16px; }
+.thread-item + .thread-item { margin-top: 40px; }
+
+.turn-question {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 14px;
+}
+.turn-question-text {
+  max-width: min(640px, 85%);
+  padding: 10px 14px;
+  border-radius: 14px 14px 4px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.turn-searched-as {
+  margin: -6px 0 14px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.thread-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 36px 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+.thread-divider::before, .thread-divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px dashed var(--border);
+}
+
+/* --- Question box, fixed under the chat --- */
+.composer {
+  flex: none;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding: 12px 24px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.composer-inner {
+  position: relative;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+.search-form { max-width: 760px; }
+
+.jump-latest {
+  position: absolute;
+  top: -58px;
+  left: min(380px, 50%);
+  transform: translateX(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1.05rem;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.jump-latest:hover { background: var(--surface-hover); }
+
 .chat-context {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
-  margin-top: 8px;
+  margin-top: 6px;
+  min-height: 1.6em;
   color: var(--text-muted);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   overflow-wrap: anywhere;
 }
 .chat-reset { padding: 2px 8px; }
 
 .search-bar {
   display: flex;
+  align-items: flex-end;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 12px;
   overflow: hidden;
 }
 
@@ -280,18 +366,23 @@ button, input { font: inherit; }
 .search-input {
   flex: 1;
   min-width: 0;
-  padding: 13px 16px;
+  max-height: 180px;
+  padding: 12px 16px;
+  font: inherit;
   font-size: 1.02rem;
+  line-height: 1.5;
   background: transparent;
   border: none;
   color: var(--text);
   outline: none;
+  resize: none;
+  overflow-y: auto;
 }
 
 .search-input::placeholder { color: var(--text-muted); }
-.search-input:disabled { opacity: 0.6; }
 
 .search-button {
+  align-self: stretch;
   padding: 0 20px;
   background: var(--primary);
   border: none;
@@ -352,6 +443,8 @@ button, input { font: inherit; }
   color: var(--text-muted);
   margin-bottom: 6px;
 }
+summary.agent-trace-label { cursor: pointer; margin-bottom: 0; }
+details.agent-trace[open] summary.agent-trace-label { margin-bottom: 6px; }
 
 .agent-trace-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
 
@@ -390,9 +483,9 @@ button, input { font: inherit; }
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 32px;
-  padding-top: 24px;
-  border-top: 1px solid var(--border);
+  padding-top: 4px;
 }
+.thread-item + .thread-item .turn { padding-top: 32px; border-top: 1px solid var(--border); }
 
 @media (min-width: 1040px) {
   .results { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 48px; }
@@ -744,7 +837,9 @@ button, input { font: inherit; }
 }
 
 @media (max-width: 560px) {
-  .app-container { padding: 24px 16px 60px; }
+  .app-container { padding: 24px 16px 24px; }
+  .composer { padding-left: 16px; padding-right: 16px; }
+  .search-button { padding: 0 14px; }
   .upload-heading { flex-direction: column; }
   .option-head { flex-wrap: wrap; }
   .option-reason, .option-evidence { margin-left: 0; }

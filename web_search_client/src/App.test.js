@@ -128,7 +128,7 @@ test('checked files scope the query; none checked searches all files', async () 
   await act(async () => { await Promise.resolve(); });
 });
 
-test('follow-ups send the earlier turns; New topic clears them', async () => {
+test('follow-ups send the earlier turns and keep earlier answers on screen; New topic clears the context', async () => {
   const { TextEncoder } = require('util');
   global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
   const doneEvent = (data) => {
@@ -143,8 +143,10 @@ test('follow-ups send the earlier turns; New topic clears them', async () => {
       },
     });
   };
+  const acmeSource = 's3://rag-datasets/uploads/acme.txt';
   const replies = [
-    { answer: 'Acme Corp was founded by Ada.', entityKeys: ['acme corp'], standaloneQuery: 'Who founded Acme Corp?' },
+    { answer: 'Acme Corp was founded by Ada.', entityKeys: ['acme corp'], standaloneQuery: 'Who founded Acme Corp?',
+      sources: [acmeSource] },
     { answer: 'In 2001.', entityKeys: ['acme corp', 'beta inc'], standaloneQuery: 'When did Acme Corp acquire Beta Inc?' },
   ];
   const base = global.fetch;
@@ -154,7 +156,8 @@ test('follow-ups send the earlier turns; New topic clears them', async () => {
   const ask = async (text) => {
     fireEvent.change(input, { target: { value: text } });
     fireEvent.submit(input.closest('form'));
-    await waitFor(() => expect(input).not.toBeDisabled());
+    expect(input).toHaveValue(''); // the box clears once a question is sent
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Searching…' })).not.toBeInTheDocument());
   };
   const searchBodies = () => global.fetch.mock.calls
     .filter(([url]) => url.endsWith('/api/v1/search')).map(([, o]) => JSON.parse(o.body));
@@ -169,7 +172,43 @@ test('follow-ups send the earlier turns; New topic clears them', async () => {
   expect(screen.getByText(/Searched as “When did Acme Corp acquire Beta Inc\?”/)).toBeInTheDocument();
   expect(screen.getByText(/refer to your last 2 questions/)).toBeInTheDocument();
 
+  // Both turns stay on screen, in order, each with its own answer; the first keeps its source link
+  const turns = screen.getAllByRole('article');
+  expect(turns.map((t) => t.querySelector('.turn-question-text').textContent))
+    .toEqual(['Who founded Acme Corp?', 'When did they acquire Beta Inc?']);
+  expect(within(turns[0]).getByText('Acme Corp was founded by Ada.')).toBeInTheDocument();
+  expect(within(turns[0]).getByRole('link', { name: /acme.*opens in a new tab/ })).toBeInTheDocument();
+  expect(within(turns[1]).getByText('In 2001.')).toBeInTheDocument();
+  expect(within(turns[1]).queryByRole('link')).not.toBeInTheDocument();
+
   fireEvent.click(screen.getByRole('button', { name: 'New topic' }));
+  expect(screen.queryByRole('button', { name: 'New topic' })).not.toBeInTheDocument();
+  expect(screen.getByText(/New topic: the next question starts fresh/)).toBeInTheDocument();
+  expect(screen.getAllByRole('article')).toHaveLength(2); // earlier answers are still there
+});
+
+test('Enter sends the question, Shift+Enter does not', async () => {
+  await openMyFiles();
+  const input = screen.getByPlaceholderText(/uploaded files/);
+  const searches = () => global.fetch.mock.calls.filter(([url]) => url.endsWith('/api/v1/search')).length;
+
+  fireEvent.change(input, { target: { value: 'Where was tea grown?' } });
+  fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+  expect(searches()).toBe(0);
+  fireEvent.keyDown(input, { key: 'Enter' });
+  expect(searches()).toBe(1);
+  await act(async () => { await Promise.resolve(); });
+});
+
+test('switching corpus clears the chat', async () => {
+  global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
+  await openMyFiles();
+  await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: 's3://rag/x.txt',
+    milvusScore: 1, pagerankScore: 1, hybridScore: 1 }]);
+  expect(screen.getAllByRole('article')).toHaveLength(1);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Wiki dump' }));
+  expect(screen.queryAllByRole('article')).toHaveLength(0);
   expect(screen.queryByRole('button', { name: 'New topic' })).not.toBeInTheDocument();
 });
 
@@ -499,13 +538,15 @@ test('shows the answer as formatted Markdown, answer first, with the checks coll
   expect(checks.querySelectorAll('li')).toHaveLength(2);
 });
 
-test('scrolls to the answer once it is complete', async () => {
+test('a new question scrolls into view, with its answer written below it', async () => {
   const scrolled = [];
   Element.prototype.scrollIntoView = jest.fn(function scroll() { scrolled.push(this); });
   await openMyFiles();
   await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: 's3://rag/x.txt',
     milvusScore: 1, pagerankScore: 1, hybridScore: 1 }]);
-  await waitFor(() => expect(scrolled.at(-1)).toHaveClass('answer-section'));
+  const latest = scrolled.filter((el) => el.classList.contains('thread-item')).at(-1);
+  expect(latest.querySelector('.turn-question-text')).toHaveTextContent('Who overtook Europe?');
+  expect(latest.querySelector('.answer-section')).not.toBeNull();
 });
 
 test('Map and Preview scroll to what they open; Map scrolls back to an open map', async () => {
