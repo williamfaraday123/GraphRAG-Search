@@ -7,6 +7,7 @@ from retriever import HybridRetriever
 from document_text import display_name
 from file_similarity import similarity_table
 from graph_retrieval import fact_text
+from conversation import carried_seeds, needs_rewrite, rewrite_query
 import networkx as nx
 import logging
 import os
@@ -60,6 +61,9 @@ class AgentState(TypedDict):
     kg_seeds: List[str]           # Entities named in the queries that the walk started from
     question_entities: List[str]  # Entity keys the question (first-round queries) names; coverage check
     file_similarity: dict         # "Which files are most similar?": file_similarity.py result, else None
+    original_query: str           # The question as the user typed it ("query" may be its rewrite)
+    history: List[dict]           # Earlier chat turns {question, answer, entity_keys} (conversation.py)
+    carried_seeds: Dict[str, float]  # Entities from earlier turns that seed the first search round
 
 # --- Helper: Graph Analysis ---
 def calculate_authority_scores(chunks: List[Dict], edges: List[Dict]) -> Dict[str, float]:
@@ -161,6 +165,58 @@ def _rank_chunks(chunks: List[dict], pr_scores: Dict[str, float]) -> List[dict]:
 
 # --- Node Functions ---
 
+def make_rewrite_node(retriever: HybridRetriever):
+    """Step -1 (follow-up questions only): rewrites a question that refers to earlier turns
+    so it stands on its own, and picks the earlier turns' entities that seed the first search
+    round (conversation.py). Everything after it searches and answers the rewritten question."""
+    def rewrite(state: AgentState):
+        history = state.get("history") or []
+        query = state["query"]
+        corpus_id = state.get("corpus_id") or "wiki"
+        file_ids = state.get("file_ids") or None
+        try:
+            named = retriever.named_keys(query, corpus_id, file_ids)
+        except Exception:
+            logger.exception("Entity lookup for the follow-up failed")
+            named = []
+
+        standalone, notes = query, []
+        if needs_rewrite(query, history, named):
+            try:
+                rewritten = rewrite_query(query, history)
+            except Exception:
+                logger.exception("Rewriting the follow-up failed; searching it as asked")
+                rewritten = ""
+            if rewritten and rewritten.strip().lower() != query.strip().lower():
+                standalone = rewritten
+                notes.append(f'searching for "{standalone}"')
+            else:
+                notes.append("kept the question as asked" + (" (rewrite rejected)" if not rewritten else ""))
+        else:
+            notes.append("the question stands on its own")
+
+        # Earlier turns' entities only when this question continues the conversation: it was
+        # rewritten, or it names nothing the graph knows. A new topic starts fresh.
+        carried = {}
+        if standalone != query or not named:
+            candidates = carried_seeds(history, exclude=named)
+            try:
+                kept = retriever.existing_entities(corpus_id, list(candidates), file_ids)
+            except Exception:
+                logger.exception("Could not check the earlier turns' entities")
+                kept = []
+            carried = {k: candidates[k] for k in kept}
+            if carried:
+                notes.append(f"carrying {len(carried)} entit{'y' if len(carried) == 1 else 'ies'} "
+                             "from earlier turns into the graph search")
+
+        return {
+            "query": standalone,
+            "carried_seeds": carried,
+            "messages": [f"Rewriter: {'; '.join(notes)}"],
+        }
+    return rewrite
+
 def plan_query_node(state: AgentState):
     """
     Step 0: Decide how to search. Simple queries are searched as-is; queries with
@@ -225,12 +281,16 @@ def make_retrieve_context_node(retriever: HybridRetriever):
         # sub-queries); follow-up searches name extra entities that aren't required
         first_round = not state.get("iteration_count")
         question_entities = list(state.get("question_entities") or [])
+        # Entities from earlier chat turns seed only the first round; later rounds search
+        # for what this question still lacks
+        carried = (state.get("carried_seeds") or None) if first_round else None
         for q in queries:
             result = retriever.search(
                 query=q,
                 top_k=state.get("top_k") or 5,
                 corpus_id=state.get("corpus_id") or "wiki",
                 file_ids=state.get("file_ids") or None,
+                carried_seeds=carried,
             )
             new_chunks.extend(result.get("chunks", []))
             new_relations.extend(result.get("relations", []))
@@ -998,12 +1058,18 @@ def synthesize_answer(state: AgentState):
 def build_query_graph(retriever: HybridRetriever):
     workflow = StateGraph(AgentState)
 
+    workflow.add_node("rewriter", make_rewrite_node(retriever))
     workflow.add_node("planner", plan_query_node)
     workflow.add_node("retriever", make_retrieve_context_node(retriever))
     workflow.add_node("analyst", make_critical_analysis_node(retriever))
     workflow.add_node("synthesizer", synthesize_answer)
 
-    workflow.set_entry_point("planner")
+    # The first question of a chat goes straight to the planner; follow-ups are rewritten first
+    workflow.set_conditional_entry_point(
+        lambda state: "rewriter" if state.get("history") else "planner",
+        {"rewriter": "rewriter", "planner": "planner"},
+    )
+    workflow.add_edge("rewriter", "planner")
     workflow.add_edge("planner", "retriever")
     workflow.add_edge("retriever", "analyst")
 

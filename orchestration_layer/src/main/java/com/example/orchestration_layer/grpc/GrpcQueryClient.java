@@ -62,15 +62,24 @@ public class GrpcQueryClient {
      * Starts the search pipeline on the Query Processor and streams
      * results through the provided event consumer.
      */
+    /** One earlier question of the chat, its (trimmed) answer, and the entity keys it named. */
+    public record Turn(String question, String answer, List<String> entityKeys) {}
+
     public void startSearch(String prompt, int topK, String corpusId, List<String> fileIds,
-                            Consumer<SearchEvent> eventConsumer) {
-        var request = QueryProto.SearchRequest.newBuilder()
+                            List<Turn> history, Consumer<SearchEvent> eventConsumer) {
+        var builder = QueryProto.SearchRequest.newBuilder()
                 .setPrompt(prompt)
                 .setTopK(topK)
                 .setUseGraphRefinement(true)
                 .setCorpusId(corpusId)
-                .addAllFileIds(fileIds) // empty = search every file in the corpus
-                .build();
+                .addAllFileIds(fileIds); // empty = search every file in the corpus
+        for (Turn turn : history) { // empty = first question of the chat
+            builder.addHistory(QueryProto.ConversationTurn.newBuilder()
+                    .setQuestion(turn.question())
+                    .setAnswer(turn.answer())
+                    .addAllEntityKeys(turn.entityKeys()));
+        }
+        var request = builder.build();
 
         asyncStub.startProcessing(request, new StreamObserver<QueryProto.SearchResponse>() {
             @Override
@@ -125,6 +134,8 @@ public class GrpcQueryClient {
                     );
                     done.setGraphPaths(graphPaths);
                     done.setGraphSeeds(a.getGraphSeedsList());
+                    done.setEntityKeys(a.getEntityKeysList());
+                    done.setStandaloneQuery(a.getStandaloneQuery());
                     eventConsumer.accept(done);
                 } else if (response.hasAgentStep()) {
                     var s = response.getAgentStep();

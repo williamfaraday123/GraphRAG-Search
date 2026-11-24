@@ -54,12 +54,13 @@ public class SearchController {
                 if (id instanceof String s && !s.isBlank()) fileIds.add(s);
             }
         }
+        List<GrpcQueryClient.Turn> history = parseHistory(body.get("history"));
 
         SseEmitter emitter = new SseEmitter(sseTimeoutMs);
-        log.info("Search request received: prompt='{}', topK={}, corpusId={}, fileIds={}",
-                prompt, topK, corpusId, fileIds.isEmpty() ? "all" : fileIds);
+        log.info("Search request received: prompt='{}', topK={}, corpusId={}, fileIds={}, earlierTurns={}",
+                prompt, topK, corpusId, fileIds.isEmpty() ? "all" : fileIds, history.size());
 
-        grpcClient.startSearch(prompt, topK, corpusId, fileIds, event -> {
+        grpcClient.startSearch(prompt, topK, corpusId, fileIds, history, event -> {
             try {
                 switch (event.getType()) {
                     case STATUS -> emitter.send(SseEmitter.event()
@@ -90,7 +91,10 @@ public class SearchController {
                                         "chunks", event.getChunks(),
                                         // Knowledge-graph fact paths behind the answer, and where the walk started
                                         "graphPaths", event.getGraphPaths() == null ? List.of() : event.getGraphPaths(),
-                                        "graphSeeds", event.getGraphSeeds() == null ? List.of() : event.getGraphSeeds()
+                                        "graphSeeds", event.getGraphSeeds() == null ? List.of() : event.getGraphSeeds(),
+                                        // Sent back with the next question as part of "history"
+                                        "entityKeys", event.getEntityKeys() == null ? List.of() : event.getEntityKeys(),
+                                        "standaloneQuery", event.getStandaloneQuery() == null ? "" : event.getStandaloneQuery()
                                 )));
                         emitter.complete();
                     }
@@ -123,6 +127,40 @@ public class SearchController {
         emitter.onError(ex -> log.error("SSE stream error: {}", ex.getMessage()));
 
         return emitter;
+    }
+
+    /** Most earlier turns forwarded; the query processor uses only the last three. */
+    private static final int MAX_HISTORY_TURNS = 3;
+    private static final int MAX_TURN_TEXT = 600;
+    private static final int MAX_TURN_KEYS = 8;
+
+    /**
+     * "history": [{"question": "...", "answer": "...", "entityKeys": ["..."]}, ...], oldest first.
+     * Malformed entries are skipped; text is capped so a client can't send whole documents.
+     */
+    static List<GrpcQueryClient.Turn> parseHistory(Object raw) {
+        List<GrpcQueryClient.Turn> turns = new ArrayList<>();
+        if (!(raw instanceof List<?> items)) return turns;
+        for (Object item : items) {
+            if (!(item instanceof Map<?, ?> turn)) continue;
+            String question = turn.get("question") instanceof String q ? q.strip() : "";
+            if (question.isEmpty()) continue;
+            String answer = turn.get("answer") instanceof String a ? a.strip() : "";
+            List<String> keys = new ArrayList<>();
+            if (turn.get("entityKeys") instanceof List<?> ks) {
+                for (Object k : ks) {
+                    if (k instanceof String s && !s.isBlank() && keys.size() < MAX_TURN_KEYS) keys.add(s);
+                }
+            }
+            turns.add(new GrpcQueryClient.Turn(cap(question), cap(answer), keys));
+        }
+        return turns.size() > MAX_HISTORY_TURNS
+                ? new ArrayList<>(turns.subList(turns.size() - MAX_HISTORY_TURNS, turns.size()))
+                : turns;
+    }
+
+    private static String cap(String text) {
+        return text.length() > MAX_TURN_TEXT ? text.substring(0, MAX_TURN_TEXT) : text;
     }
 
     /**

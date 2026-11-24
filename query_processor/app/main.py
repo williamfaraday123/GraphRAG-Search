@@ -15,6 +15,7 @@ import query_pb2_grpc
 from retriever import HybridRetriever
 from graph_engine import ANSWER_TOKEN, MAX_ITERATIONS, answer_paths, build_query_graph, similarity_paths
 from corpus import normalize_corpus_id, normalize_file_id
+from conversation import clean_history
 from corpus_indexer import CorpusIndexer
 from knowledge_graph import KnowledgeGraphBuilder
 from entity_resolution import EntityResolver
@@ -83,12 +84,18 @@ class QueryProcessorServicer:
             prompt = request.prompt
             corpus_id = normalize_corpus_id(request.corpus_id)
             file_ids = [normalize_file_id(f) for f in request.file_ids]
-            logger.info(f"Processing query: {prompt} (files: {file_ids or 'all'})")
+            history = clean_history(request.history)
+            logger.info(f"Processing query: {prompt} (files: {file_ids or 'all'}, "
+                        f"earlier turns: {len(history)})")
 
-            yield self._make_status("PLANNING", "Deciding how to search for this question...")
+            yield self._make_status("PLANNING", "Reading the follow-up against the earlier questions..."
+                                    if history else "Deciding how to search for this question...")
 
             initial_state = {
                 "query": prompt,
+                "original_query": prompt,
+                "history": history,
+                "carried_seeds": {},
                 "top_k": request.top_k or 5,
                 "corpus_id": corpus_id,
                 "file_ids": file_ids,
@@ -134,7 +141,9 @@ class QueryProcessorServicer:
                         detail = detail or "Answer written"
                     yield self._make_agent_step(node_name, f"{detail} ({elapsed:.1f} s)")
 
-                    if node_name == "planner":
+                    if node_name == "rewriter":
+                        yield self._make_status("PLANNING", "Deciding how to search for this question...")
+                    elif node_name == "planner":
                         yield self._make_status("RETRIEVING", "Searching vectors and the knowledge graph...")
                     elif node_name == "retriever":
                         yield self._make_status("ANALYZING", "Checking whether the context answers the question...")
@@ -188,6 +197,9 @@ class QueryProcessorServicer:
                                   "chunk_id", "file_id", "filename", "evidence"):
                         setattr(fact, field, f.get(field) or "")
             final_resp.answer.graph_seeds.extend(state_acc.get("kg_seeds") or [])
+            # The client sends these back with the next question (conversation.py)
+            final_resp.answer.entity_keys.extend(state_acc.get("question_entities") or [])
+            final_resp.answer.standalone_query = state_acc.get("query") or prompt
 
             yield final_resp
 

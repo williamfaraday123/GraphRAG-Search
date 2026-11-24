@@ -27,6 +27,16 @@ message SearchRequest {
   bool use_graph_refinement = 3;
   string corpus_id = 4;
   repeated string file_ids = 5; // restrict an upload-corpus search to these files; empty = all
+  // Earlier turns of this chat, oldest first (the client keeps the last few; empty = first question)
+  repeated ConversationTurn history = 6;
+}
+
+// One earlier question and its answer. Only the text and the entity keys are kept: the
+// graph holds the facts, so they are fetched again by key instead of being sent back.
+message ConversationTurn {
+  string question = 1;              // the standalone (rewritten) question that turn searched for
+  string answer = 2;                // the answer, trimmed by the client
+  repeated string entity_keys = 3;  // entities that turn's question named (FinalAnswer.entity_keys)
 }
 
 message SearchResponse {
@@ -62,6 +72,8 @@ message FinalAnswer {
   repeated ChunkInfo chunks = 4; // Ranked evidence chunks (highest hybrid_score first)
   repeated GraphPath graph_paths = 5; // Knowledge-graph fact paths behind the answer's context (best first)
   repeated string graph_seeds = 6;    // Entities named in the question that the graph walk started from
+  repeated string entity_keys = 7;    // Keys of the entities the question named; sent back in history
+  string standalone_query = 8;        // The question as searched (rewritten when it referred to earlier turns)
 }
 
 // 1-2 linked facts the graph walk followed, e.g. Hollywood overtook Europe -> Hollywood was backed by ...

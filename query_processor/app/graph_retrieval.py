@@ -406,13 +406,41 @@ class GraphRetriever:
                 ids=list(chunk_ids),
             ).data()
 
-    def search(self, query, query_vector, corpus_id, file_ids=None, vector_chunk_ids=(), max_new_chunks=5):
+    def named_keys(self, query, corpus_id, file_ids=None):
+        """Keys of the entities the query names (the same test search() starts from)."""
+        return named_entities(query, self._name_candidates(corpus_id, file_ids, query))
+
+    def existing_entities(self, corpus_id, keys, file_ids=None):
+        """The given keys that are entities with facts in the selected files (keys sent back by
+        a client from an earlier turn may be gone or from another workspace)."""
+        if not keys:
+            return []
+        with self.driver.session() as session:
+            rows = session.run(
+                """
+                UNWIND $keys AS k
+                MATCH (e:Entity {corpus_id: $corpus_id, key: k})
+                WHERE EXISTS { MATCH (e)-[f:FACT]-() WHERE $all OR f.file_id IN $file_ids }
+                RETURN e.key AS key
+                """,
+                keys=list(keys), corpus_id=corpus_id, file_ids=file_ids or [], all=not file_ids,
+            ).data()
+        found = {r["key"] for r in rows}
+        return [k for k in keys if k in found]
+
+    def search(self, query, query_vector, corpus_id, file_ids=None, vector_chunk_ids=(), max_new_chunks=5,
+               carried=None):
+        """carried: {entity key: weight} from earlier turns of a chat (conversation.py). They
+        start the walk like the question's own entities, at their lower weight, but don't
+        count as named (no bridge bonus, not in named_keys)."""
         empty = {"seeds": [], "paths": [], "chunk_scores": {}, "chunks": [], "relations": []}
 
         # A merged entity is found by any of its names (entity_resolution.py)
         candidates = self._name_candidates(corpus_id, file_ids, query)
         seeds = {key: NAMED_SEED_WEIGHT for key in named_entities(query, candidates)}
         named = set(seeds)
+        for key, weight in (carried or {}).items():
+            seeds.setdefault(key, weight)
         context_chunks = list(vector_chunk_ids)[:CONTEXT_SEED_CHUNKS]
         for key in self._context_entities(corpus_id, file_ids, context_chunks):
             seeds.setdefault(key, CONTEXT_SEED_WEIGHT)

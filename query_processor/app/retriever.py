@@ -56,6 +56,7 @@ class HybridRetriever:
         collection_name: str = None,
         corpus_id: str = WIKI_CORPUS_ID,
         file_ids: List[str] = None,
+        carried_seeds: Dict[str, float] = None,
     ) -> Dict[str, Any]:
         """
         Performs the full hybrid retrieval pipeline:
@@ -112,7 +113,7 @@ class HybridRetriever:
             try:
                 kg = self.graph_retriever.search(
                     query, query_vector, corpus_id, file_ids=file_ids or None,
-                    vector_chunk_ids=candidate_ids, max_new_chunks=top_k,
+                    vector_chunk_ids=candidate_ids, max_new_chunks=top_k, carried=carried_seeds,
                 )
             except Exception as e:
                 logger.error(f"Knowledge-graph retrieval failed: {e}")
@@ -129,7 +130,7 @@ class HybridRetriever:
         try:
             ppr_nodes = self._apply_local_ppr(
                 query_vector, corpus_id, file_ids if file_expr else None, vector_hits, kg.get("named_keys", []),
-                milvus_results, max_new_chunks=PPR_NEW_CHUNKS,
+                milvus_results, max_new_chunks=PPR_NEW_CHUNKS, carried=carried_seeds,
             )
             candidate_ids = [c["id"] for c in milvus_results]
         except Exception as e:
@@ -206,11 +207,25 @@ class HybridRetriever:
             c["ppr_score"] = 0.0
         return result
 
+    def named_keys(self, query: str, corpus_id: str, file_ids: List[str] = None) -> List[str]:
+        """Entities the query names (no embedding or vector search; one Neo4j lookup)."""
+        corpus_id = normalize_corpus_id(corpus_id)
+        return self.graph_retriever.named_keys(
+            query, corpus_id, file_ids if file_ids and corpus_id != WIKI_CORPUS_ID else None)
+
+    def existing_entities(self, corpus_id: str, keys: List[str], file_ids: List[str] = None) -> List[str]:
+        corpus_id = normalize_corpus_id(corpus_id)
+        return self.graph_retriever.existing_entities(
+            corpus_id, keys, file_ids if file_ids and corpus_id != WIKI_CORPUS_ID else None)
+
     def _apply_local_ppr(self, query_vector, corpus_id, file_ids, vector_hits, named_keys,
-                         chunks, max_new_chunks):
+                         chunks, max_new_chunks, carried=None):
         """Sets each chunk's 'ppr_score' and appends up to max_new_chunks chunks the graph
-        connects to at least as strongly as to a vector hit. Returns the nodes visited."""
+        connects to at least as strongly as to a vector hit. Returns the nodes visited.
+        carried: {entity key: weight} from earlier chat turns, below the named entities' weight."""
         seeds = {entity_node(k): NAMED_SEED_WEIGHT for k in named_keys}
+        for key, weight in (carried or {}).items():
+            seeds.setdefault(entity_node(key), weight)
         for hit in vector_hits:
             if hit.get("id"):
                 seeds[chunk_node(hit["id"])] = max(seeds.get(chunk_node(hit["id"]), 0.0),

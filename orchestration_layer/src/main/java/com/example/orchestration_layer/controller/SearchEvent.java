@@ -23,7 +23,9 @@ public class SearchEvent {
     private List<Map<String, Object>> chunks; // for DONE: ranked evidence chunks
     private List<Map<String, Object>> graphPaths; // for DONE: knowledge-graph fact paths behind the answer
     private List<String> graphSeeds;  // for DONE: entities named in the question that the graph walk started from
-    private String agentName;     // for AGENT_STEP: which agent acted (planner/retriever/analyst/synthesizer)
+    private List<String> entityKeys;  // for DONE: keys of the entities the question named (next turn's history)
+    private String standaloneQuery;   // for DONE: the question as searched (rewritten for follow-ups)
+    private String agentName;     // for AGENT_STEP: which agent acted (rewriter/planner/retriever/analyst/synthesizer)
     private String agentDetail;   // for AGENT_STEP: what it did/decided
 
     public SearchEvent() {}
@@ -94,6 +96,10 @@ public class SearchEvent {
     public void setGraphPaths(List<Map<String, Object>> graphPaths) { this.graphPaths = graphPaths; }
     public List<String> getGraphSeeds() { return graphSeeds; }
     public void setGraphSeeds(List<String> graphSeeds) { this.graphSeeds = graphSeeds; }
+    public List<String> getEntityKeys() { return entityKeys; }
+    public void setEntityKeys(List<String> entityKeys) { this.entityKeys = entityKeys; }
+    public String getStandaloneQuery() { return standaloneQuery; }
+    public void setStandaloneQuery(String standaloneQuery) { this.standaloneQuery = standaloneQuery; }
     public String getAgentName() { return agentName; }
     public void setAgentName(String agentName) { this.agentName = agentName; }
     public String getAgentDetail() { return agentDetail; }

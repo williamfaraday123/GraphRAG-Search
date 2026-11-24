@@ -5,6 +5,19 @@ import Markdown, { parseOptionChecks, renderInline, splitAnswer } from './Markdo
 import { API_BASE } from './config';
 import { formatSourceLabel, sourcePageHref, sourcePath } from './sourceLabel';
 
+// Follow-ups: the last few questions and the start of their answers go with each search, so
+// the query processor can rewrite "When did they buy it?" (it uses at most 3 turns)
+const MAX_TURNS = 3;
+const MAX_ANSWER_CHARS = 300;
+
+function trimAnswer(text) {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat.length <= MAX_ANSWER_CHARS) return flat;
+  const cut = flat.slice(0, MAX_ANSWER_CHARS);
+  const space = cut.lastIndexOf(' ');
+  return `${space > MAX_ANSWER_CHARS / 2 ? cut.slice(0, space) : cut}…`;
+}
+
 function App() {
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState('files');
@@ -46,6 +59,10 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [done, setDone] = useState(false);
+  // Earlier turns sent with each follow-up: {question, answer (trimmed), entityKeys}, oldest first
+  const [conversation, setConversation] = useState([]);
+  const [searchedAs, setSearchedAs] = useState(''); // the rewritten question, when it was rewritten
+  const askedRef = useRef('');
   const eventSourceRef = useRef(null);
   const resultRef = useRef(null);
   const answerRef = useRef(null);
@@ -97,6 +114,7 @@ function App() {
     setPinnedHighlight(null);
     setGraphPaths([]);
     setGraphSeeds([]);
+    setSearchedAs('');
   }, []);
 
   const mapOpen = showMap && mode === 'files';
@@ -203,6 +221,7 @@ function App() {
   const chooseMode = useCallback((nextMode) => {
     setMode(nextMode);
     resetState();
+    setConversation([]); // earlier questions were about the other corpus
   }, [resetState]);
 
   const handleUpload = useCallback(async (e) => {
@@ -328,6 +347,7 @@ function App() {
 
     resetState();
     setIsLoading(true);
+    askedRef.current = query.trim();
 
     const controller = new AbortController();
 
@@ -336,6 +356,8 @@ function App() {
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({
         prompt: query.trim(),
+        // Earlier turns, so "When did they buy it?" can be resolved; empty for the first question
+        history: conversation.slice(-MAX_TURNS),
         topK: 5,
         corpusId: mode === 'wiki' ? 'wiki' : corpusId,
         // Checked files scope the question; none checked = search every uploaded file
@@ -400,7 +422,7 @@ function App() {
 
     eventSourceRef.current = { close: () => controller.abort() };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, isLoading, mode, corpusId, uploadedFiles, selectedFileIds, resetState]);
+  }, [query, isLoading, mode, corpusId, uploadedFiles, selectedFileIds, resetState, conversation]);
 
   const handleSSEEvent = (eventType, data) => {
     switch (eventType) {
@@ -425,6 +447,17 @@ function App() {
         setGraphPaths(data.graphPaths || []);
         setGraphSeeds(data.graphSeeds || []);
         setConfidence(data.confidence);
+        {
+          const asked = askedRef.current;
+          const standalone = (data.standaloneQuery || asked).trim();
+          setSearchedAs(standalone.toLowerCase() !== asked.toLowerCase() ? standalone : '');
+          // The next question sees this one as the search understood it
+          setConversation((prev) => [...prev, {
+            question: standalone,
+            answer: trimAnswer(data.answer || ''),
+            entityKeys: data.entityKeys || [],
+          }].slice(-MAX_TURNS));
+        }
         break;
       case 'error':
         setError(data.message);
@@ -464,6 +497,7 @@ function App() {
   }, [sourceCache, fetchChunkSource]);
 
   const agentLabels = {
+    rewriter: 'Rewriter',
     planner: 'Planner',
     retriever: 'Retriever',
     analyst: 'Critic',
@@ -658,6 +692,21 @@ function App() {
             {isLoading ? 'Searching…' : 'Search'}
           </button>
         </div>
+        {conversation.length > 0 && (
+          <p className="chat-context">
+            {searchedAs && <span>Searched as “{searchedAs}”. </span>}
+            Follow-up questions can refer to your last {conversation.length === 1
+              ? 'question' : `${conversation.length} questions`}.
+            <button
+              type="button"
+              className="file-action chat-reset"
+              onClick={() => { setConversation([]); setSearchedAs(''); }}
+              disabled={isLoading}
+            >
+              New topic
+            </button>
+          </p>
+        )}
       </form>
 
       {status && (

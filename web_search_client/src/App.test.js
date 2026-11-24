@@ -128,6 +128,51 @@ test('checked files scope the query; none checked searches all files', async () 
   await act(async () => { await Promise.resolve(); });
 });
 
+test('follow-ups send the earlier turns; New topic clears them', async () => {
+  const { TextEncoder } = require('util');
+  global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
+  const doneEvent = (data) => {
+    const bytes = new TextEncoder().encode(`event:done\ndata:${JSON.stringify(data)}\n\n`);
+    let sent = false;
+    return Promise.resolve({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: () => Promise.resolve(sent ? { done: true } : ((sent = true), { done: false, value: bytes })),
+        }),
+      },
+    });
+  };
+  const replies = [
+    { answer: 'Acme Corp was founded by Ada.', entityKeys: ['acme corp'], standaloneQuery: 'Who founded Acme Corp?' },
+    { answer: 'In 2001.', entityKeys: ['acme corp', 'beta inc'], standaloneQuery: 'When did Acme Corp acquire Beta Inc?' },
+  ];
+  const base = global.fetch;
+  global.fetch = jest.fn((url, options) => (url.endsWith('/api/v1/search') ? doneEvent(replies.shift()) : base(url, options)));
+  await openMyFiles();
+  const input = screen.getByPlaceholderText(/uploaded files/);
+  const ask = async (text) => {
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.submit(input.closest('form'));
+    await waitFor(() => expect(input).not.toBeDisabled());
+  };
+  const searchBodies = () => global.fetch.mock.calls
+    .filter(([url]) => url.endsWith('/api/v1/search')).map(([, o]) => JSON.parse(o.body));
+
+  await ask('Who founded Acme Corp?');
+  await screen.findByText(/refer to your last question/);
+  await ask('When did they acquire Beta Inc?');
+  expect(searchBodies()[0].history).toEqual([]);
+  expect(searchBodies()[1].history).toEqual([
+    { question: 'Who founded Acme Corp?', answer: 'Acme Corp was founded by Ada.', entityKeys: ['acme corp'] },
+  ]);
+  expect(screen.getByText(/Searched as “When did Acme Corp acquire Beta Inc\?”/)).toBeInTheDocument();
+  expect(screen.getByText(/refer to your last 2 questions/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'New topic' }));
+  expect(screen.queryByRole('button', { name: 'New topic' })).not.toBeInTheDocument();
+});
+
 test('select all toggles every file', async () => {
   await openMyFiles();
 

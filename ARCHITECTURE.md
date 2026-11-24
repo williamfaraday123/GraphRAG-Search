@@ -66,6 +66,8 @@ Both restore jobs only fill empty stores, so they never overwrite an existing in
 
 1. The browser sends `POST /api/v1/search` to the orchestration layer with `prompt`, optional `topK`, and a corpus ID (`wiki` or an upload workspace UUID).
 2. `SearchController` calls the query processor's `StartProcessing` gRPC method.
+   - **Follow-up questions:** the browser also sends `history`, its last 3 turns. Each turn holds the question as it was searched, the first ~300 characters of the answer, and the entity keys that question named (`entityKeys` from the previous `done` event). Retrieved chunks and facts are not sent back: the graph holds them, and they are loaded again by key. "New topic" or switching corpus clears the history.
+   - With history, a `rewriter` step (`conversation.py`) runs first. It rewrites the question with `EDGE_MODEL` only when it refers back (a pronoun, "what about…") or names no entity in the graph, and keeps the rewrite only if every word it adds appears in the earlier turns. When the question continues the conversation, the earlier turns' entities also seed the first round's fact walk and local PPR. Their weight is 0.5 for the previous turn and halves for each older turn, below the 1.0 of entities the question names. They are not added to the question's entities, so the coverage check doesn't ask for them. Every later step searches and answers the rewritten question.
 3. The query processor's planner either searches the prompt directly or decomposes a multi-part query into a small number of subqueries.
 4. For each search query, `HybridRetriever`:
    - embeds the query with `all-MiniLM-L6-v2`;
@@ -97,7 +99,7 @@ Uploads are synchronous and limited to five `.txt`/`.md` files per request, 5 MB
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/v1/search` | Starts a search and returns an SSE stream. Body: `{"prompt":"...","topK":5}`. |
+| `POST /api/v1/search` | Starts a search and returns an SSE stream. Body: `{"prompt":"...","topK":5}`, plus optional `"history":[{"question","answer","entityKeys"}]` for follow-ups. The `done` event carries `entityKeys` and `standaloneQuery` for the next turn's history. |
 | `POST /api/v1/corpora` | Creates an isolated file-upload workspace. |
 | `POST /api/v1/corpora/{corpusId}/files` | Uploads and indexes text/Markdown files. |
 | `GET /api/v1/corpora/{corpusId}/files` | Lists indexed files for a workspace. |
@@ -153,6 +155,7 @@ Within Docker Compose, services communicate over the `ai-net` network using serv
 | `query_processor/app/main.py` | gRPC server and streamed responses |
 | `query_processor/app/retriever.py` | Milvus, Neo4j, and object-storage retrieval |
 | `query_processor/app/graph_engine.py` | LangGraph workflow, PageRank, and LLM stages |
+| `query_processor/app/conversation.py` | Follow-up questions: when to rewrite, the rewrite and its check, entities carried from earlier turns |
 | `query_processor/app/local_ppr.py` | Local push Personalized PageRank over a corpus graph (wiki or upload workspace) |
 | `query_processor/app/coverage.py` | Graph coverage check that decides whether another retrieval round is needed |
 | `query_processor/app/entity_resolution.py` | Merges entities that name the same concept (same normalised wording, or close meaning with the same main noun) into one node, keeping other names as aliases |
