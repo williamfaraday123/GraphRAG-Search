@@ -109,6 +109,9 @@ services:
     container_name: ollama
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      # Requests run at once, so knowledge-graph extraction (KG_PARALLEL) can overlap sentences
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
     # No published port: the other containers reach it as http://ollama:11434 on ai-net,
     # and publishing 11434 would clash with an Ollama already installed on the host
     restart: unless-stopped

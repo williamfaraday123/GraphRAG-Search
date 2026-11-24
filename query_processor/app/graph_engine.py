@@ -703,9 +703,16 @@ def needs_steps(state) -> bool:
     return bool(_DESCRIBED.search(state["query"]) or any(p.get("links") for p in answer_paths(state)))
 
 
+def _context_first(context_text) -> str:
+    """The opening of both prompts of a multi-part answer (steps, then answer). The two begin
+    with exactly this text, so Ollama reuses what it read for the steps pass instead of reading
+    the context again: about half the time of the second pass on a CPU."""
+    return f"Context:\n{context_text}\n\n=== End of context ===\n\n"
+
+
 def _steps_prompt(query, context_text) -> str:
     # The example is about another topic on purpose: small models copy examples taken from the task
-    return f"""Work out the query below step by step, using only the context. The query may describe
+    return _context_first(context_text) + f"""Work out the query below step by step, using only the context above. The query may describe
 things without naming them (e.g. "the city whose port closed") and set conditions on the answer.
 
 Write one STEP line for each description or condition in the query, in the order needed to answer it.
@@ -726,17 +733,15 @@ RESULT: the river towns
 Name only what a sentence says. If the context names a group but not its members, the answer is the
 group: do not list members the context does not tie to every condition. Write nothing else.
 
-Query: {query}
-
-Context:
-{context_text}"""
+Query: {query}"""
 
 
-def work_out_steps(query, context_text, chunks) -> str:
+def work_out_steps(query, context_text, chunks, system=()) -> str:
     """Runs the steps prompt and keeps only steps whose quoted sentence is really in the context
-    (or that say 'not stated'). The RESULT line is kept only when no step was dropped."""
+    (or that say 'not stated'). The RESULT line is kept only when no step was dropped.
+    system: the same system messages as the answer pass, so both prompts start alike."""
     llm = chat_client("ANSWER_MODEL", temperature=0)
-    raw = llm.invoke([HumanMessage(content=_steps_prompt(query, context_text))]).content
+    raw = llm.invoke([*system, HumanMessage(content=_steps_prompt(query, context_text))]).content
     words = _words(" ".join(c.get("content") or "" for c in chunks))
     trigrams = {tuple(words[i:i + 3]) for i in range(len(words) - 2)}
 
@@ -757,8 +762,9 @@ def work_out_steps(query, context_text, chunks) -> str:
 
 def _open_prompt(query, context_text, steps="") -> str:
     if steps:
-        # Multi-part question: answer from the checked steps instead of in one pass
-        return f"""Answer the query using only the context below. The context is grouped by file under
+        # Multi-part question: answer from the checked steps instead of in one pass. Context
+        # first, as in the steps prompt, so its reading is reused (_context_first)
+        return _context_first(context_text) + f"""Answer the query using only the context above. The context is grouped by file under
 headings like "=== File 1: report.pdf ==="; cite a file by its name only, e.g. [report.pdf].
 
 The query was worked out step by step first; each step's quoted sentence was checked against the files:
@@ -770,10 +776,7 @@ answer the steps lead to. Use only what the steps and their sentences say: never
 the query to something no sentence ties it to, and if the steps say "not stated", say the files don't
 state it. Reply in Markdown with no headings and no list of citations.
 
-Query: {query}
-
-Context:
-{context_text}"""
+Query: {query}"""
     # One sentence per point the context makes, and stop. Tried and dropped: a quoted-evidence
     # section first (the answer then retold every quote, relevant or not), and "at most 3
     # sentences" (the model fills the budget with invented cause-and-effect links). Asked "How
@@ -932,6 +935,13 @@ exactly as given, and do not add anything the facts above do not say."""
     return "\n\n".join([heading, explanation] + rest)
 
 
+UPLOAD_SYSTEM_PROMPT = (
+    "Answer only from the provided uploaded-file context. Do not use outside "
+    "knowledge. If the context does not contain the answer, say that the "
+    "uploaded files do not provide enough information."
+)
+
+
 def synthesize_answer(state: AgentState):
     """Step 3: Generate final response"""
     if state.get("file_similarity"):
@@ -954,6 +964,9 @@ def synthesize_answer(state: AgentState):
     files = list(dict.fromkeys(
         display_name((c.get("source") or "Unknown").rsplit("/", 1)[-1]) for c in state["refined_context"]
     ))
+    system = []
+    if state.get("corpus_id") and state["corpus_id"] != "wiki":
+        system = [SystemMessage(content=UPLOAD_SYSTEM_PROMPT)]
     options = listed_options(state["query"])
     note = []
     if options:
@@ -962,7 +975,7 @@ def synthesize_answer(state: AgentState):
         steps = ""
         if needs_steps(state):
             try:
-                steps = work_out_steps(state["query"], context_text, state["refined_context"])
+                steps = work_out_steps(state["query"], context_text, state["refined_context"], system)
             except Exception:
                 logger.exception("Working out the answer steps failed; answering in one pass")
             n = steps.count("\n- ") + steps.startswith("- ")
@@ -970,15 +983,7 @@ def synthesize_answer(state: AgentState):
                     if steps else "Synthesizer: no step of the question could be checked against the files"]
         prompt = _open_prompt(state["query"], context_text, steps)
 
-    messages = [HumanMessage(content=prompt)]
-    if state.get("corpus_id") and state["corpus_id"] != "wiki":
-        messages.insert(0, SystemMessage(
-            content=(
-                "Answer only from the provided uploaded-file context. Do not use outside "
-                "knowledge. If the context does not contain the answer, say that the "
-                "uploaded files do not provide enough information."
-            )
-        ))
+    messages = [*system, HumanMessage(content=prompt)]
     # Streamed to the UI as it is written; the corrections below reach it with the final
     # answer, which replaces the streamed text
     answer = _write_answer(llm, messages, _answer_writer())

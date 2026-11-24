@@ -34,6 +34,8 @@ process_file for each article, and the result ships as a snapshot (see the READM
 Configuration:
   KG_ENABLED        true | false                         (default: true)
   KG_MODEL          Ollama model for extraction          (default: qwen2.5:1.5b)
+  KG_PARALLEL       sentences sent to Ollama at once     (default: 2; Ollama runs them
+                    together only up to its own OLLAMA_NUM_PARALLEL)
   KG_OLLAMA_URL     Ollama base URL; defaults to EDGE_MODEL_BASE_URL without "/v1"
 """
 import http.client
@@ -46,6 +48,7 @@ import socket
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 from corpus_map import split_sentences
 
@@ -314,14 +317,36 @@ def chunk_sentences(content, previous_content=""):
     return out
 
 
+def _parallel_calls():
+    try:
+        return max(1, int(os.getenv("KG_PARALLEL", "2")))
+    except ValueError:
+        return 1
+
+
 def extract_chunk(content, previous_content="", call_model=None):
     """All checked entities and facts for one chunk. Raises ConnectionError if Ollama
     is unreachable. call_model(sentence, previous) replaces extract_facts (the worker
-    passes one that yields to searches)."""
+    passes one that yields to searches).
+
+    Up to KG_PARALLEL sentences are sent to the model at once. Each prompt holds only the
+    sentence and the document text before it, never an earlier answer, so the prompts are
+    the same as when sent one by one; results are collected in sentence order."""
     call = call_model or extract_facts
+    pairs = chunk_sentences(content, previous_content)
+
+    def one(pair):
+        sentence, earlier = pair
+        return validate_facts(sentence, call(sentence, earlier), context=earlier)
+
+    workers = min(_parallel_calls(), len(pairs))
+    if workers <= 1:
+        results = [one(p) for p in pairs]
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-call") as pool:
+            results = list(pool.map(one, pairs))  # raises the first error, in sentence order
     entities, facts = {}, []
-    for sentence, earlier in chunk_sentences(content, previous_content):
-        found_entities, found_facts = validate_facts(sentence, call(sentence, earlier), context=earlier)
+    for found_entities, found_facts in results:
         for entity in found_entities:
             entities.setdefault(entity["key"], entity)
         facts.extend(found_facts)
@@ -415,22 +440,21 @@ class KnowledgeGraphBuilder:
         self._queued_lock = threading.Lock()
         self._searches = 0
         self._search_cv = threading.Condition()
-        self._active_call = None   # open connection of the model call in progress
-        self._call_stopped = False
+        self._active_calls = []    # {"connection", "stopped"} of each model call in progress
         self._ensure_indexes()
         if self.enabled and background:
             threading.Thread(target=self._run, name="kg-builder", daemon=True).start()
             self.enqueue_backlog()
 
     # Searches and extraction share one CPU-bound Ollama; searches win. A search stops the
-    # sentence being extracted (closing the connection makes Ollama stop generating) and
-    # that sentence is extracted again from the start once no search is running.
+    # sentences being extracted (closing a connection makes Ollama stop generating) and
+    # they are extracted again from the start once no search is running.
     def search_started(self):
         with self._search_cv:
             self._searches += 1
-            if self._active_call is not None:
-                self._call_stopped = True
-                _close_now(self._active_call)
+            for call in self._active_calls:
+                call["stopped"] = True
+                _close_now(call["connection"])
 
     def search_finished(self):
         with self._search_cv:
@@ -442,28 +466,32 @@ class KnowledgeGraphBuilder:
             while self._searches:
                 self._search_cv.wait(timeout=5)
 
-    def _register_call(self, connection):
-        with self._search_cv:
-            if self._searches:  # a search started between the wait and the connect
-                self._call_stopped = True
-                raise _StoppedForSearch()
-            self._active_call = connection
-
     def _call_model(self, sentence, previous):
+        """Runs on several threads at once (extract_chunk); each call registers itself so
+        a search can stop it."""
         while True:
             self._wait_for_searches()
+            call = {"connection": None, "stopped": False}
+
+            def register(connection):
+                with self._search_cv:
+                    if self._searches:  # a search started between the wait and the connect
+                        call["stopped"] = True
+                        raise _StoppedForSearch()
+                    call["connection"] = connection
+                    self._active_calls.append(call)
+
             try:
-                return extract_facts(sentence, previous, on_connect=self._register_call)
+                return extract_facts(sentence, previous, on_connect=register)
             except Exception:
                 with self._search_cv:
-                    stopped = self._call_stopped
+                    stopped = call["stopped"]
                 if not stopped:
                     raise
                 logger.debug("Knowledge graph: sentence stopped for a search; will redo it")
             finally:
                 with self._search_cv:
-                    self._active_call = None
-                    self._call_stopped = False
+                    self._active_calls = [c for c in self._active_calls if c is not call]
 
     def enqueue_file(self, corpus_id, file_id):
         if not self.enabled:

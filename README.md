@@ -210,6 +210,7 @@ Set these as environment variables. Docker Compose reads them from `.env` in the
 | `KG_ENABLED` | `true` | Extract a knowledge graph from uploads (and, in the wiki build, from the wiki) |
 | `KG_MODEL` | `qwen2.5:1.5b` | Ollama model for knowledge-graph extraction |
 | `KG_OLLAMA_URL` | `EDGE_MODEL_BASE_URL` without `/v1` | Ollama URL for extraction |
+| `KG_PARALLEL` | `2` | Sentences sent to Ollama at once during extraction. Ollama must allow as many with `OLLAMA_NUM_PARALLEL` (set for the bundled container in `docker-compose.hub.yml`; for Ollama on the host, set it there and restart Ollama). `1` sends them one by one |
 | `KG_SEARCH_ENABLED` | `true` | Use knowledge-graph fact paths in searches |
 | `WIKI_FILES` | `wiki.test.txt` | Wiki build only: WikiText files in `ingestion_pipeline/raw_data/` to build, comma-separated |
 | `WIKI_MAX_ARTICLES` | `0` (all) | Wiki build only: stop after this many articles |
