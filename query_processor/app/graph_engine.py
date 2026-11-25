@@ -7,7 +7,7 @@ from retriever import HybridRetriever
 from document_text import display_name
 from file_similarity import similarity_table
 from graph_retrieval import fact_text
-from conversation import carried_seeds, needs_rewrite, rewrite_query
+from conversation import carried_seeds, needs_rewrite, points_back, rewrite_query
 import networkx as nx
 import logging
 import os
@@ -196,9 +196,10 @@ def make_rewrite_node(retriever: HybridRetriever):
             notes.append("the question stands on its own")
 
         # Earlier turns' entities only when this question continues the conversation: it was
-        # rewritten, or it names nothing the graph knows. A new topic starts fresh.
+        # rewritten, it points back ("this", "they") even if the rewrite failed, or it names
+        # nothing the graph knows. A new topic starts fresh.
         carried = {}
-        if standalone != query or not named:
+        if standalone != query or points_back(query) or not named:
             candidates = carried_seeds(history, exclude=named)
             try:
                 kept = retriever.existing_entities(corpus_id, list(candidates), file_ids)
