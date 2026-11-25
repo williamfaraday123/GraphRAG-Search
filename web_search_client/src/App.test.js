@@ -1,6 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import App from './App';
 import { resetMemoryStore } from './chatStore';
+import { scrollInChat } from './scrollInChat';
+
+// jsdom has no layout: record what the chat area was asked to scroll to
+jest.mock('./scrollInChat', () => ({ scrollInChat: jest.fn() }));
+const scrolledTo = () => scrollInChat.mock.calls.map(([, el]) => el).filter(Boolean);
 
 const CORPUS = '00000000-0000-4000-8000-000000000001';
 const FILES = [
@@ -47,11 +52,29 @@ const MAP = {
 const json = (data, ok = true, status = 200) =>
   Promise.resolve({ ok, status, json: () => Promise.resolve(data) });
 
-// Routes fetch calls by method + URL so each test can inspect what the UI sent.
+// Routes fetch calls by method + URL so each test can inspect what the UI sent. CORPUS is the
+// workspace the browser already had; each new chat's first upload creates another (NEW_CORPUS_n).
+const newCorpus = (n) => `00000000-0000-4000-8000-0000000001${String(n).padStart(2, '0')}`;
+let workspaces;
 function mockApi({ files = FILES } = {}) {
+  workspaces = { [CORPUS]: files };
   global.fetch = jest.fn((url, options = {}) => {
     const method = options.method || 'GET';
-    if (url.endsWith(`/corpora/${CORPUS}/files`) && method === 'GET') return json(files);
+    if (url.endsWith('/api/v1/corpora') && method === 'POST') {
+      const id = newCorpus(Object.keys(workspaces).length);
+      workspaces[id] = [];
+      return json({ corpusId: id });
+    }
+    const filesOf = url.match(/\/corpora\/([^/]+)\/files$/);
+    if (filesOf && method === 'GET') return json(workspaces[filesOf[1]] || []);
+    if (filesOf && method === 'POST') {
+      const added = [...options.body.getAll('files')].map((f, i) => ({
+        fileId: `${filesOf[1].slice(0, 30)}${String(workspaces[filesOf[1]].length + i).padStart(6, '0')}`,
+        filename: f.name, success: true, chunkCount: 1,
+      }));
+      workspaces[filesOf[1]] = [...workspaces[filesOf[1]], ...added];
+      return json({ files: added });
+    }
     if (url.endsWith('/api/v1/search')) {
       return Promise.resolve({
         ok: true,
@@ -79,7 +102,7 @@ beforeEach(() => {
   window.localStorage.setItem('graphrag-corpus-id', CORPUS);
   resetMemoryStore(); // jsdom has no IndexedDB: chats are kept in memory, fresh per test
   mockApi();
-  Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it; Map/Preview scroll to what they open
+  scrollInChat.mockClear();
 });
 
 test('opens in My files mode, listed first, and switches to the wiki', async () => {
@@ -97,19 +120,85 @@ test('opens in My files mode, listed first, and switches to the wiki', async () 
   await act(async () => { await Promise.resolve(); });
 });
 
-test('a first visit creates an upload workspace on load, once', async () => {
-  window.localStorage.removeItem('graphrag-corpus-id');
-  const created = '00000000-0000-4000-8000-000000000099';
-  global.fetch = jest.fn((url, options = {}) => {
-    if (url.endsWith('/api/v1/corpora') && options.method === 'POST') return json({ corpusId: created });
-    return json([]);
-  });
-  render(<App />);
+async function upload(name) {
+  const input = screen.getByLabelText('Choose text, Markdown, PDF, Word or MP3 files');
+  fireEvent.change(input, { target: { files: [new File(['text'], name, { type: 'text/plain' })] } });
+  fireEvent.submit(input.closest('form'));
+  await screen.findByLabelText(`Select ${name}`);
+}
 
-  await waitFor(() => expect(window.localStorage.getItem('graphrag-corpus-id')).toBe(created));
-  const posts = global.fetch.mock.calls.filter(([url, o]) => url.endsWith('/api/v1/corpora') && o?.method === 'POST');
-  expect(posts).toHaveLength(1);
-  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining(`/corpora/${created}/files`)));
+const workspacePosts = () => global.fetch.mock.calls
+  .filter(([url, o]) => url.endsWith('/api/v1/corpora') && o?.method === 'POST');
+
+test('a first visit creates no workspace until a chat uploads its first file', async () => {
+  window.localStorage.removeItem('graphrag-corpus-id');
+  render(<App />);
+  await act(async () => { await Promise.resolve(); });
+  expect(workspacePosts()).toHaveLength(0);
+  expect(screen.getByText(/Each chat has its own files/)).toBeInTheDocument();
+
+  await upload('notes.txt');
+  expect(workspacePosts()).toHaveLength(1);
+  // A chat with files but no question yet is kept in the sidebar
+  expect(chatRows()).toEqual(['Untitled chat']);
+});
+
+test("each chat has its own files: another chat's files are neither listed nor searched", async () => {
+  window.confirm = jest.fn(() => true);
+  routeSearches((prompt) => sseResponse([['done', { answer: `Answer to ${prompt}` }]]));
+  await openMyFiles(); // the browser's existing workspace goes to the first chat
+  ask('Who overtook Europe?');
+  await screen.findByText('Answer to Who overtook Europe?');
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New chat' }));
+  await waitFor(() => expect(screen.queryByLabelText('Select cinema.txt')).not.toBeInTheDocument());
+  expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled(); // nothing to search yet
+  await upload('notes.txt');
+  const second = newCorpus(1);
+  expect(screen.queryByLabelText('Select cinema.txt')).not.toBeInTheDocument();
+  ask('What do the notes say?');
+  await screen.findByText('Answer to What do the notes say?');
+  expect(searchBodies()[1]).toMatchObject({ corpusId: second, fileIds: [] });
+  expect(searchBodies()[0]).toMatchObject({ corpusId: CORPUS });
+
+  // Back in the first chat: only its own files
+  fireEvent.click(screen.getByTitle('Who overtook Europe?'));
+  await screen.findByLabelText('Select cinema.txt');
+  expect(screen.queryByLabelText('Select notes.txt')).not.toBeInTheDocument();
+
+  // Deleting a chat deletes its files from search too
+  fireEvent.click(screen.getByRole('button', { name: 'Delete What do the notes say?' }));
+  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('and the files uploaded to it'));
+  await waitFor(() => expect(global.fetch.mock.calls.some(([url, o]) => o?.method === 'DELETE'
+    && url.includes(`/corpora/${second}/files/`))).toBe(true));
+  expect(global.fetch.mock.calls.some(([url, o]) => o?.method === 'DELETE' && url.includes(CORPUS))).toBe(false);
+});
+
+test('the workspace older chats shared stays with them, and a new chat starts with its own', async () => {
+  const { saveChat } = require('./chatStore');
+  const oldChat = (id, title, updatedAt) => ({
+    id, title, mode: 'files', corpusId: CORPUS, fileIds: [], createdAt: updatedAt, updatedAt, context: [],
+    turns: [{ id: `${id}-t`, question: title, done: true, text: 'Old answer', agentSteps: [], sources: [],
+      chunks: [], graphPaths: [], graphSeeds: [] }],
+  });
+  await saveChat(oldChat('old-1', 'Old question', 2));
+  await saveChat(oldChat('old-2', 'Older question', 1));
+  render(<App />);
+  await screen.findByTitle('Old question');
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.queryByLabelText('Select cinema.txt')).not.toBeInTheDocument(); // the new chat has none
+  expect(window.localStorage.getItem('graphrag-corpus-id')).toBeNull();
+
+  fireEvent.click(screen.getByTitle('Old question'));
+  await screen.findByLabelText('Select cinema.txt');
+
+  // Deleting one keeps the shared files: the other old chat still uses them
+  window.confirm = jest.fn(() => true);
+  fireEvent.click(screen.getByRole('button', { name: 'Delete Old question' }));
+  expect(window.confirm).toHaveBeenCalledWith(expect.not.stringContaining('files'));
+  expect(chatRows()).toEqual(['Older question']);
+  await act(async () => { await Promise.resolve(); });
+  expect(global.fetch.mock.calls.some(([, o]) => o?.method === 'DELETE')).toBe(false);
 });
 
 test('checked files scope the query; none checked searches all files', async () => {
@@ -283,6 +372,7 @@ test('each chat keeps its own thread and follow-up context', async () => {
   await screen.findByText('Ada founded Acme Corp.');
   fireEvent.click(screen.getByRole('button', { name: '+ New chat' }));
   expect(screen.queryAllByRole('article')).toHaveLength(0);
+  fireEvent.click(screen.getByRole('button', { name: 'Wiki dump' })); // the new chat has no files
   ask('What is tea?');
   await screen.findByText('Tea is a drink.');
   expect(chatRows()).toEqual(['What is tea?', 'Who founded Acme Corp?']); // newest first
@@ -291,6 +381,7 @@ test('each chat keeps its own thread and follow-up context', async () => {
   fireEvent.click(screen.getByTitle('Who founded Acme Corp?'));
   expect(screen.getAllByRole('article')).toHaveLength(1);
   expect(screen.queryByText('Tea is a drink.')).not.toBeInTheDocument();
+  await screen.findByLabelText('Select cinema.txt'); // its own files load again
   ask('When did they buy Beta Inc?');
   await screen.findByText('In 2001.');
   expect(searchBodies()[2].history).toEqual([
@@ -331,11 +422,12 @@ test('one search at a time: another chat waits, and the running answer keeps wri
   ask('Who founded Acme Corp?');
   await screen.findByRole('button', { name: 'Searching…' });
   fireEvent.click(screen.getByRole('button', { name: '+ New chat' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Wiki dump' })); // the new chat has no files
   const nav = screen.getByRole('navigation', { name: 'Chats' });
   expect(within(nav).getByLabelText('Answering')).toBeInTheDocument();
 
   // The new chat can type, but not send, until the other answer is done
-  const input = screen.getByPlaceholderText(/uploaded files/);
+  const input = screen.getByPlaceholderText(/wiki dump/);
   fireEvent.change(input, { target: { value: 'What is tea?' } });
   expect(screen.getByRole('button', { name: 'Waiting…' })).toBeDisabled();
   expect(screen.getByText(/“Who founded Acme Corp\?” is still being answered/)).toBeInTheDocument();
@@ -589,7 +681,6 @@ async function searchWithEvidence(evidence, extra = {}) {
 }
 
 test('hovering an evidence chunk highlights its entities in the corpus map; Show in map pins it', async () => {
-  Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it
   const chunk = (chunkId, content) => ({ chunkId, content, source: 's3://rag/x.txt',
     milvusScore: 0.9, pagerankScore: 0.1, hybridScore: 0.5 });
   await openMyFiles();
@@ -600,7 +691,7 @@ test('hovering an evidence chunk highlights its entities in the corpus map; Show
   fireEvent.click(within(first).getByRole('button', { name: 'Show in map' }));
   const banner = await screen.findByText(/Evidence:/);
   expect(banner.closest('p')).toHaveTextContent('Evidence: cinema.txt · chunk 1. 2 entities highlighted.');
-  expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  expect(scrolledTo().some((el) => el.classList.contains('corpus-map-anchor'))).toBe(true);
   const ringed = () => [...document.querySelectorAll('.node.in-evidence')].map((n) => n.getAttribute('aria-label').split(',')[0]);
   expect(ringed()).toEqual(['Hollywood', 'Europe']);
   expect(document.querySelector('.node.dim').getAttribute('aria-label')).toMatch(/^special effects/);
@@ -725,36 +816,34 @@ test('shows the answer as formatted Markdown, answer first, with the checks coll
   expect(checks.querySelectorAll('li')).toHaveLength(2);
 });
 
-test('a new question scrolls into view, with its answer written below it', async () => {
-  const scrolled = [];
-  Element.prototype.scrollIntoView = jest.fn(function scroll() { scrolled.push(this); });
+test('a new question scrolls into view, with its answer written below it, within the chat only', async () => {
   await openMyFiles();
   await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: 's3://rag/x.txt',
     milvusScore: 1, pagerankScore: 1, hybridScore: 1 }]);
-  const latest = scrolled.filter((el) => el.classList.contains('thread-item')).at(-1);
+  const call = scrollInChat.mock.calls.filter(([, el]) => el?.classList.contains('thread-item')).at(-1);
+  expect(call[0]).toHaveClass('chat-scroll'); // never the page around it
+  const latest = call[1];
   expect(latest.querySelector('.turn-question-text')).toHaveTextContent('Who overtook Europe?');
   expect(latest.querySelector('.answer-section')).not.toBeNull();
 });
 
 test('Map and Preview scroll to what they open; Map scrolls back to an open map', async () => {
-  const scrolled = [];
-  Element.prototype.scrollIntoView = jest.fn(function scroll() { scrolled.push(this); });
   await openMyFiles();
 
   fireEvent.click(screen.getByLabelText('Select cinema.txt'));
   fireEvent.click(screen.getByRole('button', { name: 'Preview (1)' }));
-  expect(scrolled.at(-1)).toHaveClass('file-preview');
+  expect(scrolledTo().at(-1)).toHaveClass('file-preview');
 
   fireEvent.click(screen.getByRole('button', { name: 'Map (1)' }));
-  expect(scrolled.at(-1).querySelector('.corpus-map')).not.toBeNull();
+  expect(scrolledTo().at(-1).querySelector('.corpus-map')).not.toBeNull();
   await screen.findByText(/3 entities/);
 
   // Already open: the button stays enabled, scrolls back to the map and updates it
-  scrolled.length = 0;
+  scrollInChat.mockClear();
   const mapButton = screen.getByRole('button', { name: 'Map (1)' });
   expect(mapButton).toBeEnabled();
   fireEvent.click(mapButton);
-  expect(scrolled.at(-1).querySelector('.corpus-map')).not.toBeNull();
+  expect(scrolledTo().at(-1).querySelector('.corpus-map')).not.toBeNull();
   await waitFor(() => expect(screen.queryByText('Updating the map…')).not.toBeInTheDocument());
 });
 

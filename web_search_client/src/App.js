@@ -5,6 +5,7 @@ import ChatTurn from './ChatTurn';
 import CorpusMap from './CorpusMap';
 import { API_BASE } from './config';
 import { deleteChat as deleteStoredChat, loadChats, saveChat } from './chatStore';
+import { scrollInChat } from './scrollInChat';
 
 // Follow-ups: the last few questions and the start of their answers go with each search, so
 // the query processor can rewrite "When did they buy it?" (it uses at most 3 turns)
@@ -34,9 +35,36 @@ function titleFrom(question) {
   return flat.length > MAX_TITLE_CHARS ? `${flat.slice(0, MAX_TITLE_CHARS - 1)}…` : flat;
 }
 
+// Before chats had their own workspaces, one upload workspace was shared by the whole browser
+const LEGACY_WORKSPACE_KEY = 'graphrag-corpus-id';
+const UNTITLED = 'Untitled chat';
+
+// The chat's own upload workspace ('' when it has none yet; older wiki chats stored 'wiki').
+// Each chat uploads to and searches only its own workspace, so one chat's files never show
+// up in, or change the answers of, another chat.
+function workspaceOf(chat) {
+  return chat && chat.corpusId && chat.corpusId !== 'wiki' ? chat.corpusId : '';
+}
+
+async function createWorkspace() {
+  const response = await fetch(`${API_BASE}/api/v1/corpora`, { method: 'POST' });
+  if (!response.ok) throw new Error(`Could not create workspace (${response.status})`);
+  return (await response.json()).corpusId;
+}
+
+// A deleted chat's files are removed from search too (vectors and graph facts)
+async function deleteWorkspaceFiles(corpusId) {
+  const base = `${API_BASE}/api/v1/corpora/${encodeURIComponent(corpusId)}/files`;
+  const response = await fetch(base);
+  if (!response.ok) throw new Error(`Could not list the chat's files (${response.status})`);
+  const files = await response.json();
+  await Promise.all(files.map((f) => fetch(`${base}/${encodeURIComponent(f.fileId)}`, { method: 'DELETE' })));
+}
+
 /**
  * A chat, as kept in memory and saved in IndexedDB (chatStore.js):
- *   { id, title, mode: 'files' | 'wiki', corpusId, fileIds (ticked when last asked),
+ *   { id, title, mode: 'files' | 'wiki', corpusId (its own upload workspace, see workspaceOf),
+ *     fileIds (ticked when last asked),
  *     createdAt, updatedAt, turns: [turn | { id, divider: true }],
  *     context: [{ question, answer, entityKeys }] (the last turns sent with a follow-up) }
  * A turn is what ChatTurn shows: { id, question, searchedAs, status, agentSteps, text,
@@ -74,9 +102,6 @@ const ROW_SEP = '\u0002';
 function App() {
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState('files');
-  const [corpusId, setCorpusId] = useState(
-    () => window.localStorage.getItem('graphrag-corpus-id') || ''
-  );
   const [corpusError, setCorpusError] = useState(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState([]);
@@ -130,9 +155,29 @@ function App() {
   const context = activeChat ? activeChat.context : [];
   const isLoading = Boolean(running);
   const runningElsewhere = Boolean(running && running.chatId !== activeId);
+  // The open chat's upload workspace: its files are the only ones listed, mapped and searched
+  const corpusId = workspaceOf(activeChat);
+  const corpusIdRef = useRef(corpusId);
+  corpusIdRef.current = corpusId;
 
+  // Another chat: nothing about the previous chat's files stays on screen
   useEffect(() => {
-    if (!corpusId) return undefined;
+    setPreviewIds([]);
+    setShowMap(false);
+    setMapRequest(null);
+    setUploadFeedback(null);
+    setFileActionError(null);
+    setCorpusError(null);
+  }, [activeId]);
+
+  // The open chat's files (none until its first upload creates its workspace)
+  useEffect(() => {
+    setUploadedFiles([]);
+    setFilesLoaded(!corpusId);
+    if (!corpusId) {
+      setSelectedFileIds(new Set());
+      return undefined;
+    }
     let active = true;
     const loadFiles = async () => {
       try {
@@ -178,13 +223,32 @@ function App() {
     return () => { active = false; };
   }, []);
 
+  // The workspace this browser shared across chats before each chat had its own: kept by the
+  // saved chats that use it, or (no chat uses it) given to the open chat so its files aren't
+  // lost. Either way new chats start with a workspace of their own.
+  useEffect(() => {
+    if (!chatsLoaded) return;
+    let legacy = '';
+    try {
+      legacy = window.localStorage.getItem(LEGACY_WORKSPACE_KEY) || '';
+      window.localStorage.removeItem(LEGACY_WORKSPACE_KEY);
+    } catch (err) { /* storage unavailable: nothing to migrate */ }
+    if (!legacy || Object.values(chatsRef.current).some((c) => c.corpusId === legacy)) return;
+    const id = activeIdRef.current;
+    setChats((prev) => {
+      const chat = prev[id] || emptyChat(id, 'files');
+      if (workspaceOf(chat)) return prev;
+      return { ...prev, [id]: { ...chat, mode: 'files', corpusId: legacy } };
+    });
+  }, [chatsLoaded]);
+
   // Save chats that changed. While an answer streams in, its chat is saved when the question
   // is added (so a reload keeps the question) but not on every token; it is saved again once
-  // the answer is done. Chats without a question are not saved.
+  // the answer is done. Chats with neither a question nor uploaded files are not saved.
   useEffect(() => {
     if (!chatsLoaded) return;
     Object.values(chats).forEach((chat) => {
-      if (!chat.turns.length) return;
+      if (!chat.turns.length && !workspaceOf(chat)) return;
       const saved = savedRef.current.get(chat.id);
       if (saved === chat) return;
       if (running?.chatId === chat.id && saved && saved.turns.length === chat.turns.length) return;
@@ -216,7 +280,8 @@ function App() {
       if (el) el.scrollTop = el.scrollHeight;
       return;
     }
-    if (latestTurnRef.current) latestTurnRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    // As far up as the chat can scroll (an answer that has only just started may not fill it)
+    scrollInChat(scrollRef.current, latestTurnRef.current);
   }, [turns.length, activeId]);
 
   const onChatScroll = useCallback(() => {
@@ -233,16 +298,12 @@ function App() {
 
   // After "Show in map" the map may only just be mounting, so scroll once it exists
   useEffect(() => {
-    if (scrollToMap && mapRef.current) {
-      mapRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    if (scrollToMap && mapRef.current) scrollInChat(scrollRef.current, mapRef.current);
   }, [scrollToMap]);
 
   // Same for the file preview opened by the Preview button
   useEffect(() => {
-    if (scrollToPreview && previewRef.current) {
-      previewRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    if (scrollToPreview && previewRef.current) scrollInChat(scrollRef.current, previewRef.current);
   }, [scrollToPreview]);
 
   // Like Preview: every Map click builds the map for the files checked right now
@@ -271,7 +332,7 @@ function App() {
 
   const backToEvidence = useCallback(() => {
     const item = pinnedHighlight && document.getElementById(pinnedHighlight.anchorId);
-    if (item) item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (item) scrollInChat(scrollRef.current, item, 'center');
   }, [pinnedHighlight]);
 
   const closeMap = useCallback(() => {
@@ -297,38 +358,11 @@ function App() {
     [mode, filesLoaded, uploadedFiles],
   );
 
-  // "My files" needs an upload workspace: created on first use (on page load, since it's
-  // the default mode) and remembered in local storage. The ref stops a second request while
-  // one is in flight (React runs effects twice in development).
-  const workspaceRequested = useRef(false);
-  const ensureWorkspace = useCallback(async () => {
-    if (corpusId || workspaceRequested.current) return;
-    workspaceRequested.current = true;
-    setCreatingWorkspace(true);
-    setCorpusError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/v1/corpora`, { method: 'POST' });
-      if (!response.ok) throw new Error(`Could not create workspace (${response.status})`);
-      const workspace = await response.json();
-      window.localStorage.setItem('graphrag-corpus-id', workspace.corpusId);
-      setCorpusId(workspace.corpusId);
-    } catch (err) {
-      setCorpusError(err.message);
-      workspaceRequested.current = false; // switching back to My files retries
-    } finally {
-      setCreatingWorkspace(false);
-    }
-  }, [corpusId]);
-
-  useEffect(() => {
-    if (mode === 'files') ensureWorkspace();
-  }, [mode, ensureWorkspace]);
-
-  // Each chat searches one corpus. Switching with questions already asked starts a new chat
-  // for the other corpus; the current one stays in the sidebar (and keeps running if it is).
+  // Each chat searches one corpus. Switching with questions asked or files uploaded starts a
+  // new chat for the other corpus; the current one stays in the sidebar (and keeps running).
   const chooseMode = useCallback((nextMode) => {
     if (nextMode === mode) return;
-    if (chats[activeId]?.turns.length) setActiveId(newId('chat'));
+    if (chats[activeId]?.turns.length || workspaceOf(chats[activeId])) setActiveId(newId('chat'));
     setPinnedHighlight(null);
     setHoverHighlight(null);
     setMode(nextMode);
@@ -338,43 +372,62 @@ function App() {
     e.preventDefault();
     const selectedFiles = Array.from(e.target.elements.files.files || []);
     if (!selectedFiles.length || uploading) return;
-    if (!corpusId) {
-      setUploadFeedback({ error: 'Your upload workspace is still being prepared.' });
-      return;
-    }
+    const form = e.target;
+    const chatId = activeId;
+    let target = corpusId;
+    // Still this upload's chat (the user may open another chat while files are indexed)
+    const stillHere = () => corpusIdRef.current === target;
 
     setUploading(true);
-    const hasAudio = selectedFiles.some((file) => /\.mp3$/i.test(file.name));
-    setUploadFeedback(hasAudio
-      ? { message: 'Transcribing audio before indexing. This can take a few minutes…' }
-      : null);
     try {
+      // A chat's first upload creates its workspace
+      if (!target) {
+        setCreatingWorkspace(true);
+        try {
+          target = await createWorkspace();
+        } finally {
+          setCreatingWorkspace(false);
+        }
+        setChats((prev) => {
+          const chat = prev[chatId] || emptyChat(chatId, 'files');
+          return { ...prev, [chatId]: { ...chat, mode: 'files', corpusId: target, updatedAt: Date.now() } };
+        });
+      }
+      const hasAudio = selectedFiles.some((file) => /\.mp3$/i.test(file.name));
+      setUploadFeedback(hasAudio
+        ? { message: 'Transcribing audio before indexing. This can take a few minutes…' }
+        : null);
       const formData = new FormData();
       selectedFiles.forEach((file) => formData.append('files', file));
       const response = await fetch(
-        `${API_BASE}/api/v1/corpora/${encodeURIComponent(corpusId)}/files`,
+        `${API_BASE}/api/v1/corpora/${encodeURIComponent(target)}/files`,
         { method: 'POST', body: formData }
       );
       if (!response.ok) throw new Error(`Upload failed (${response.status})`);
       const result = await response.json();
       const successful = (result.files || []).filter((file) => file.success);
       const failed = (result.files || []).filter((file) => !file.success);
-      if (successful.length) {
-        setUploadedFiles((previous) => [...previous, ...successful]);
+      if (stillHere()) {
+        if (successful.length) {
+          setUploadedFiles((previous) => [
+            ...previous.filter((f) => !successful.some((s) => s.fileId === f.fileId)),
+            ...successful,
+          ]);
+        }
+        setUploadFeedback({
+          message: successful.length
+            ? `${successful.length} file${successful.length === 1 ? '' : 's'} indexed and ready.`
+            : null,
+          error: failed.map((file) => `${file.filename}: ${file.message}`).join(' '),
+        });
       }
-      setUploadFeedback({
-        message: successful.length
-          ? `${successful.length} file${successful.length === 1 ? '' : 's'} indexed and ready.`
-          : null,
-        error: failed.map((file) => `${file.filename}: ${file.message}`).join(' '),
-      });
-      e.target.reset();
+      form.reset();
     } catch (err) {
-      setUploadFeedback({ error: err.message });
+      if (!target || stillHere()) setUploadFeedback({ error: err.message });
     } finally {
       setUploading(false);
     }
-  }, [corpusId, uploading]);
+  }, [activeId, corpusId, uploading]);
 
   const selectedCount = uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).length;
   const allSelected = uploadedFiles.length > 0 && selectedCount === uploadedFiles.length;
@@ -441,6 +494,8 @@ function App() {
         failures.push(`${file.filename}: ${err.message}`);
       }
     }
+    setDeletingFiles(false);
+    if (corpusIdRef.current !== corpusId) return; // another chat is open now: its list is loaded fresh
     setUploadedFiles((prev) => prev.filter((f) => !deleted.has(f.fileId)));
     setSelectedFileIds((prev) => new Set([...prev].filter((id) => !deleted.has(id))));
     setPreviewIds((prev) => prev.filter((id) => !deleted.has(id)));
@@ -448,7 +503,6 @@ function App() {
       ? { message: `Deleted ${deleted.size} file${deleted.size === 1 ? '' : 's'}.` }
       : null);
     if (failures.length) setFileActionError(`Could not delete ${failures.join('; ')}`);
-    setDeletingFiles(false);
   }, [uploadedFiles, selectedFileIds, deletingFiles, corpusId]);
 
   const handleSearch = useCallback((e) => {
@@ -472,7 +526,6 @@ function App() {
           ...chat,
           title: chat.title || titleFrom(asked),
           mode,
-          corpusId: mode === 'wiki' ? 'wiki' : corpusId,
           fileIds,
           updatedAt: Date.now(),
           turns: [...chat.turns, {
@@ -496,8 +549,9 @@ function App() {
         prompt: asked,
         history,
         topK: 5,
+        // Only this chat's own workspace is searched
         corpusId: mode === 'wiki' ? 'wiki' : corpusId,
-        // Checked files scope the question; none checked = search every uploaded file
+        // Checked files scope the question; none checked = search every file in this chat
         fileIds,
       }),
       signal: controller.signal,
@@ -655,7 +709,16 @@ function App() {
   const removeChat = useCallback((id) => {
     const chat = chatsRef.current[id];
     if (!chat) return;
-    if (!window.confirm(`Delete the chat “${chat.title}”? This can't be undone.`)) return;
+    // Its files go too, unless an older chat still shares its workspace (before per-chat
+    // workspaces, every chat in a browser used the same one)
+    const workspace = workspaceOf(chat);
+    const ownsFiles = Boolean(workspace) && !Object.values(chatsRef.current)
+      .some((c) => c.id !== id && c.corpusId === workspace);
+    if (!window.confirm(`Delete the chat “${chat.title || UNTITLED}”${ownsFiles ? ' and the files uploaded to it' : ''}? `
+      + "This can't be undone.")) return;
+    if (ownsFiles) {
+      deleteWorkspaceFiles(workspace).catch((err) => console.warn('Could not delete the chat\'s files', err));
+    }
     if (runningRef.current?.chatId === id) {
       abortRef.current?.abort();
       setRunning(null);
@@ -670,11 +733,12 @@ function App() {
     if (activeIdRef.current === id) setActiveId(newId('chat'));
   }, []);
 
-  // Sidebar rows, newest first; recomputed only when a title, mode or time changes
+  // Sidebar rows, newest first; recomputed only when a title, mode or time changes. A chat
+  // with files but no question yet is listed too, so its files can be found again.
   const sidebarKey = Object.values(chats)
-    .filter((c) => c.turns.length)
+    .filter((c) => c.turns.length || workspaceOf(c))
     .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((c) => [c.id, c.title, c.mode, c.updatedAt].join(FIELD_SEP))
+    .map((c) => [c.id, c.title || UNTITLED, c.mode, c.updatedAt].join(FIELD_SEP))
     .join(ROW_SEP);
   const sidebarItems = useMemo(() => (sidebarKey
     ? sidebarKey.split(ROW_SEP).map((row) => {
@@ -770,7 +834,7 @@ function App() {
               <div className="upload-heading">
                 <div>
                   <h2>Ask questions about your files</h2>
-                  <p>Answers in this mode use your uploaded files only.</p>
+                  <p>Files uploaded here belong to this chat: other chats don't see or search them.</p>
                 </div>
                 <span className="upload-format">TXT · MD · PDF · DOCX · MP3 · max 5 MB each</span>
               </div>
@@ -780,10 +844,10 @@ function App() {
                   name="files"
                   accept=".txt,.md,.pdf,.docx,.mp3,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,audio/mpeg"
                   multiple
-                  disabled={uploading || creatingWorkspace || !corpusId}
+                  disabled={uploading || creatingWorkspace}
                   aria-label="Choose text, Markdown, PDF, Word or MP3 files"
                 />
-                <button type="submit" className="upload-button" disabled={uploading || creatingWorkspace || !corpusId}>
+                <button type="submit" className="upload-button" disabled={uploading || creatingWorkspace}>
                   {creatingWorkspace ? 'Preparing workspace…' : uploading ? 'Indexing…' : 'Upload and index'}
                 </button>
               </form>
@@ -929,7 +993,8 @@ function App() {
             <div className="empty-state">
               <p>
                 {mode === 'files' && !uploadedFiles.length
-                  ? 'Upload a text, Markdown, PDF, Word or MP3 file above, then ask a question about it below.'
+                  ? 'Upload a text, Markdown, PDF, Word or MP3 file above, then ask a question about it below. '
+                    + 'Each chat has its own files.'
                   : mode === 'files'
                     ? 'Ask a question about your files below. Tick files above to search only those.'
                     : 'Ask a question about the articles in the wiki dump below.'}

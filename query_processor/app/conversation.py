@@ -9,7 +9,8 @@ pronoun gives the graph walk and PPR nothing to start from. Before a follow-up i
      entity named. That is most follow-ups, so most cost one small-model call.
   2. rewrite_query(): the small model (EDGE_MODEL) turns the question into one that stands on
      its own, from the last few turns. check_rewrite() accepts it only if every word it adds
-     comes from those turns, so it can't bring in an entity nobody mentioned.
+     comes from those turns, so it can't bring in an entity nobody mentioned. A "which ..."
+     question the model leaves unresolved gets the compared names put in by name_choices().
   3. carried_seeds(): the entities earlier turns named start the graph walk and PPR again, at
      a lower weight that halves with each older turn. They are not entities this question
      names, so the coverage check never asks for them.
@@ -124,35 +125,175 @@ _NOT_NAMES = {"compare", "contrast", "explain", "describe", "list", "name", "giv
 _CAPITALISED_RUN = re.compile(r"\b[A-Z][\w'’\-]*(?:\s+[A-Z][\w'’\-]*)*")
 
 
+_WORD_IN_RUN = re.compile(r"\S+")
+# What joins two names in a list: "A and B", "A, B or C", "A vs B", "A and the B"
+_JOINER = re.compile(r"^\s*(?:,\s*(?:and|or)?|and|or|vs\.?|versus|&)\s*(?:the\s+|a\s+|an\s+)?$",
+                     re.IGNORECASE)
+MAX_COMPARED = 4
+
+
+def _name_spans(text: str, keys=()) -> List[tuple]:
+    """(start, end, name) for each name in text, in order: the entity keys as the text spells
+    them (so lowercase names such as "tea" count too), then capitalised phrases ("PageRank",
+    "Connected Components") outside those, without a leading "Compare"/"In"/... ."""
+    spans = []
+
+    def overlaps(s, e):
+        return any(s < e2 and s2 < e for s2, e2, _ in spans)
+
+    for key in keys:
+        m = re.search(r"(?<![\w-])" + re.escape(key) + r"(?![\w-])", text, re.IGNORECASE)
+        if m and not overlaps(m.start(), m.end()):
+            spans.append((m.start(), m.end(), m.group(0)))
+    for run in _CAPITALISED_RUN.finditer(text):
+        words = [w for w in _WORD_IN_RUN.finditer(run.group(0))]
+        while words and words[0].group(0).lower() in _NOT_NAMES:
+            words = words[1:]
+        if not words:
+            continue
+        start, end = run.start() + words[0].start(), run.end()
+        name = re.sub(r"['’]s$", "", text[start:end])
+        end = start + len(name)
+        if name and not overlaps(start, end):
+            spans.append((start, end, name))
+    spans.sort()
+    seen, out = set(), []
+    for s, e, n in spans:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append((s, e, n))
+    return out
+
+
+def _joined_group(text: str, keys=()) -> List[str]:
+    """The longest list of names joined by "and"/"or"/"vs"/commas in text: "PageRank and
+    Connected Components" in "Compare how PageRank and Connected Components use ...", but not
+    "Google" in "Compare how Spark and Hadoop handle failures at Google"."""
+    spans = _name_spans(text, keys)
+    best, group = [], spans[:1]
+    for prev, cur in zip(spans, spans[1:]):
+        if _JOINER.match(text[prev[1]:cur[0]]):
+            group.append(cur)
+        else:
+            group = [cur]
+        if len(group) > len(best):
+            best = list(group)
+    return [n for _, _, n in best] if len(best) >= 2 else []
+
+
+def _question_names(turn: dict) -> List[str]:
+    return [n for _, _, n in _name_spans(turn["question"], turn.get("entity_keys", []))]
+
+
 def mentioned_names(history: List[dict], limit: int = 8) -> List[str]:
-    """Names in the earlier questions (newest first): capitalised phrases such as "PageRank"
-    or "Connected Components", then the entity keys those turns named."""
+    """Names used in the earlier turns (newest first): those in the questions (entity keys and
+    capitalised phrases), then lists of names in the answers ("PageRank, Connected Components
+    and Shortest Paths" after "Which algorithms does Pregel run?")."""
     names, seen = [], set()
-
-    def add(name):
-        name = name.strip(" ,.;:?!\"'")
-        if name and name.lower() not in seen and name.lower() not in _NOT_NAMES:
-            seen.add(name.lower())
-            names.append(name)
-
     for turn in reversed(history):
-        for run in _CAPITALISED_RUN.findall(turn["question"]):
-            words = run.split()
-            while words and words[0].lower() in _NOT_NAMES:
-                words = words[1:]
-            add(" ".join(words))
-        for key in turn.get("entity_keys", []):
-            if not any(key.lower() in n.lower() or n.lower() in key.lower() for n in names):
-                add(key)
+        for name in _question_names(turn) + _joined_group(turn.get("answer", "")):
+            if name.lower() not in seen:
+                seen.add(name.lower())
+                names.append(name)
     return names[:limit]
 
 
-def _rewrite_prompt(query: str, history: List[dict]) -> str:
+def _compared_names(history: List[dict]) -> List[str]:
+    """What a "which ..." follow-up chooses between, newest turn first: the names a question
+    listed together ("Compare PageRank and Connected Components"), else a list in that turn's
+    answer, else a question's names when it named two to four things."""
+    for turn in reversed(history):
+        group = (_joined_group(turn["question"], turn.get("entity_keys", []))
+                 or _joined_group(turn.get("answer", "")))
+        if group:
+            return group[:MAX_COMPARED]
+    for turn in reversed(history):
+        names = _question_names(turn)
+        if 2 <= len(names) <= MAX_COMPARED:
+            return names
+    return []
+
+
+# A pronoun or bare "this"/"that" a single earlier name can replace: "Why does it converge?",
+# "How is their state stored?", "Where does this happen?"
+_REPLACEABLE = re.compile(
+    r"\b(?:(?P<poss>its|their)|(?P<pron>it|they|them)|"
+    r"(?P<dem>this|that)(?=\s+(?:is|was|does|did|do|has|have|happen\w*|work\w*|mean\w*|use\w*)\b|\s*[?.!]?\s*$))\b",
+    re.IGNORECASE,
+)
+# "it" that refers to nothing: "Is it possible to ...", "it's hard to ...", "how long does it take"
+_EXPLETIVE_IT = re.compile(
+    r"\b(?:(?:is|was|isn't|wasn't)\s+it|it(?:'s|’s|\s+is|\s+was))\s+(?:\w+\s+){0,2}(?:to|that)\b"
+    r"|\bit\s+takes?\b|\bdoes\s+it\s+take\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_pronoun(query: str, history: List[dict]) -> str:
+    """When the previous question named exactly one thing, its first pronoun replaced by that
+    name: "Why does it converge?" after "How does PageRank work?" -> "Why does PageRank
+    converge?". "" when that doesn't apply (no single name, already named, expletive "it")."""
+    if not history:
+        return ""
+    names = _question_names(history[-1])
+    if len(names) != 1:
+        return ""
+    name = names[0]
+    query_words = _words(query)
+    if all(_word_matches(w, query_words) for w in _content_words(name) or [name.lower()]):
+        return ""
+    m = _REPLACEABLE.search(query)
+    if not m or (m.group("pron") and m.group(0).lower() == "it" and _EXPLETIVE_IT.search(query)):
+        return ""
+    replacement = f"{name}'s" if m.group("poss") else name
+    return query[:m.start()] + replacement + query[m.end():]
+
+
+# "Which algorithm ...", "Which one ...", "Which of them ...", "Which is ..."
+_WHICH = re.compile(
+    r"^\s*which\s+(?:(?P<pick>(?:one\s+)?of\s+(?:them|these|those|the\s+two|the\s+three|both)|one)"
+    r"|(?P<verb>is|are|was|were|does|do|did|has|have|had|can|could|would|will|should|might|may)\b"
+    r"|(?P<noun>[\w\-]+))",
+    re.IGNORECASE,
+)
+
+
+def name_choices(query: str, history: List[dict]) -> str:
+    """A "which ..." question that names none of the things the previous question compared,
+    with those things put in: "Which algorithm, PageRank or Connected Components, is ...?",
+    "Which of PageRank and Connected Components is ...?". "" when it doesn't apply.
+
+    Small models often repeat such a question unchanged, which leaves the search nothing to
+    start from, so this doesn't rely on the model."""
+    m = _WHICH.match(query)
+    if not m:
+        return ""
+    names = _compared_names(history)
+    if len(names) < 2:
+        return ""
+    query_words = _words(query)
+    if any(all(_word_matches(w, query_words) for w in _content_words(n)) for n in names
+           if _content_words(n)):
+        return ""  # it already names one of them
+    rest = query[m.end():]
+    which = query[m.start():m.end()].lstrip()[:5]  # "Which" with the question's own case
+    if m.group("noun"):
+        return f"{query[m.start():m.end()].lstrip()}, {', '.join(names[:-1])} or {names[-1]},{rest}"
+    verb = f" {m.group('verb')}" if m.group("verb") else ""
+    return f"{which} of {', '.join(names[:-1])} and {names[-1]}{verb}{rest}"
+
+
+def _rewrite_prompt(query: str, history: List[dict], strict: bool = False) -> str:
     turns = "\n".join(
         f"User: {t['question']}\nAssistant: {t['answer']}" for t in history
     )
     names = mentioned_names(history)
     names_line = f"\nNames used in the conversation: {', '.join(names)}\n" if names else ""
+    # Second try after the model repeated a question that clearly refers back
+    must = ("\nThis follow-up refers to something named earlier in the conversation. Your "
+            "reply must replace that reference with the name"
+            + (f" (one of: {', '.join(names)})" if names else "")
+            + ". Do not repeat the question unchanged.\n") if strict else ""
     # Small models follow what comes last: the instructions and examples come first, then the
     # conversation, then the question to rewrite
     return f"""Rewrite a follow-up question from a chat so it can be understood without the
@@ -174,7 +315,7 @@ Conversation so far:
 {turns}
 {names_line}
 Follow-up question: {query}
-
+{must}
 Reply with only the rewritten question."""
 
 
@@ -185,17 +326,49 @@ def _first_line(text: str) -> str:
     return line.strip().strip('"“”').strip()
 
 
-def rewrite_query(query: str, history: List[dict], llm=None) -> str:
-    """The question rewritten to stand on its own, or "" when the model's rewrite was rejected
-    (the caller then searches the question as asked)."""
-    llm = llm or chat_client("EDGE_MODEL", temperature=0)
+def _ask_model(llm, query: str, history: List[dict], strict: bool = False) -> str:
     response = llm.invoke([
         SystemMessage(content="You rewrite follow-up questions in a chat so they stand on their own."),
-        HumanMessage(content=_rewrite_prompt(query, history)),
+        HumanMessage(content=_rewrite_prompt(query, history, strict)),
     ])
     rewrite = _first_line(response.content)
     if not check_rewrite(query, rewrite, history):
         logger.info("Rewrite rejected for %r: %r", query, rewrite)
+        return ""
+    return rewrite
+
+
+def _unchanged(rewrite: str, query: str) -> bool:
+    return not rewrite or rewrite.strip().lower() == query.strip().lower()
+
+
+def _fill_in(query: str, rewrite: str, history: List[dict]) -> str:
+    """What the model left unresolved, filled in without it: a "which ..." question gets the
+    compared names, a pronoun gets the previous question's single name."""
+    base = rewrite or query
+    named = name_choices(base, history)
+    if named:
+        logger.info("Named the compared things in %r: %r", base, named)
+        return named
+    if _unchanged(rewrite, query):
+        resolved = resolve_pronoun(query, history)
+        if resolved:
+            logger.info("Replaced the pronoun in %r: %r", query, resolved)
+            return resolved
+    return rewrite
+
+
+def rewrite_query(query: str, history: List[dict], llm=None) -> str:
+    """The question rewritten to stand on its own. "" when the model's rewrite was rejected,
+    or when the question points back ("it", "they") and nothing resolved it (the caller then
+    searches the question as asked, with the earlier turns' entities carried over)."""
+    llm = llm or chat_client("EDGE_MODEL", temperature=0)
+    rewrite = _fill_in(query, _ask_model(llm, query, history), history)
+    if _unchanged(rewrite, query) and points_back(query):
+        # The model repeated a question that clearly refers back: ask once more, firmly
+        logger.info("Rewrite left %r unresolved; asking again", query)
+        rewrite = _fill_in(query, _ask_model(llm, query, history, strict=True), history)
+    if _unchanged(rewrite, query) and points_back(query):
         return ""
     return rewrite
 
