@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import App from './App';
+import { resetMemoryStore } from './chatStore';
 
 const CORPUS = '00000000-0000-4000-8000-000000000001';
 const FILES = [
@@ -76,6 +77,7 @@ async function openMyFiles() {
 
 beforeEach(() => {
   window.localStorage.setItem('graphrag-corpus-id', CORPUS);
+  resetMemoryStore(); // jsdom has no IndexedDB: chats are kept in memory, fresh per test
   mockApi();
   Element.prototype.scrollIntoView = jest.fn(); // jsdom lacks it; Map/Preview scroll to what they open
 });
@@ -200,7 +202,7 @@ test('Enter sends the question, Shift+Enter does not', async () => {
   await act(async () => { await Promise.resolve(); });
 });
 
-test('switching corpus clears the chat', async () => {
+test('switching corpus starts a new chat; the earlier one stays in the sidebar and reopens in its corpus', async () => {
   global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
   await openMyFiles();
   await searchWithEvidence([{ chunkId: `${CINEMA}:0`, content: 'x', source: 's3://rag/x.txt',
@@ -210,6 +212,191 @@ test('switching corpus clears the chat', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Wiki dump' }));
   expect(screen.queryAllByRole('article')).toHaveLength(0);
   expect(screen.queryByRole('button', { name: 'New topic' })).not.toBeInTheDocument();
+
+  const nav = screen.getByRole('navigation', { name: 'Chats' });
+  fireEvent.click(within(nav).getByTitle('Who overtook Europe?'));
+  expect(screen.getByRole('button', { name: 'My files' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getAllByRole('article')).toHaveLength(1);
+});
+
+// --- Several chats -----------------------------------------------------------------------
+
+function sseResponse(events) {
+  global.TextDecoder = global.TextDecoder || require('util').TextDecoder; // jsdom lacks it
+  const text = events.map(([type, data]) => `event:${type}\ndata:${JSON.stringify(data)}\n\n`).join('');
+  const reads = [{ done: false, value: new Uint8Array(Buffer.from(text)) }];
+  return Promise.resolve({
+    ok: true,
+    body: { getReader: () => ({ read: () => Promise.resolve(reads.shift() || { done: true }) }) },
+  });
+}
+
+// A search whose answer arrives only when the test calls finish()
+function heldSearch() {
+  global.TextDecoder = global.TextDecoder || require('util').TextDecoder;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const reads = [];
+  return {
+    response: Promise.resolve({
+      ok: true,
+      body: { getReader: () => ({ read: () => gate.then(() => reads.shift() || { done: true }) }) },
+    }),
+    finish(data) {
+      reads.push({ done: false, value: new Uint8Array(Buffer.from(`event:done\ndata:${JSON.stringify(data)}\n\n`)) });
+      release();
+    },
+  };
+}
+
+// Search requests answered by reply(prompt, body); everything else by mockApi
+function routeSearches(reply) {
+  const base = global.fetch;
+  global.fetch = jest.fn((url, options) => (url.endsWith('/api/v1/search')
+    ? reply(JSON.parse(options.body).prompt, JSON.parse(options.body))
+    : base(url, options)));
+}
+
+const searchBodies = () => global.fetch.mock.calls
+  .filter(([url]) => url.endsWith('/api/v1/search')).map(([, o]) => JSON.parse(o.body));
+
+function ask(text) {
+  const input = screen.getByPlaceholderText(/uploaded files|wiki dump/);
+  fireEvent.change(input, { target: { value: text } });
+  fireEvent.submit(input.closest('form'));
+}
+
+const chatRows = () => [...screen.getByRole('navigation', { name: 'Chats' }).querySelectorAll('.chat-open')]
+  .map((b) => b.title);
+
+test('each chat keeps its own thread and follow-up context', async () => {
+  const replies = {
+    'Who founded Acme Corp?': { answer: 'Ada founded Acme Corp.', entityKeys: ['acme corp'] },
+    'What is tea?': { answer: 'Tea is a drink.', entityKeys: ['tea'] },
+    'When did they buy Beta Inc?': { answer: 'In 2001.', entityKeys: ['acme corp', 'beta inc'],
+      standaloneQuery: 'When did Acme Corp buy Beta Inc?' },
+  };
+  routeSearches((prompt) => sseResponse([['done', replies[prompt]]]));
+  await openMyFiles();
+
+  ask('Who founded Acme Corp?');
+  await screen.findByText('Ada founded Acme Corp.');
+  fireEvent.click(screen.getByRole('button', { name: '+ New chat' }));
+  expect(screen.queryAllByRole('article')).toHaveLength(0);
+  ask('What is tea?');
+  await screen.findByText('Tea is a drink.');
+  expect(chatRows()).toEqual(['What is tea?', 'Who founded Acme Corp?']); // newest first
+
+  // Back to the first chat: only its thread, and follow-ups use only its turns
+  fireEvent.click(screen.getByTitle('Who founded Acme Corp?'));
+  expect(screen.getAllByRole('article')).toHaveLength(1);
+  expect(screen.queryByText('Tea is a drink.')).not.toBeInTheDocument();
+  ask('When did they buy Beta Inc?');
+  await screen.findByText('In 2001.');
+  expect(searchBodies()[2].history).toEqual([
+    { question: 'Who founded Acme Corp?', answer: 'Ada founded Acme Corp.', entityKeys: ['acme corp'] },
+  ]);
+  expect(chatRows()).toEqual(['Who founded Acme Corp?', 'What is tea?']); // just used: back on top
+});
+
+test('chats are saved in the browser and come back after a reload; an unfinished answer says it was interrupted', async () => {
+  const held = heldSearch();
+  routeSearches((prompt) => (prompt === 'Who founded Acme Corp?'
+    ? sseResponse([['done', { answer: 'Ada founded Acme Corp.', entityKeys: ['acme corp'] }]])
+    : held.response));
+  const first = render(<App />);
+  await screen.findByLabelText('Select cinema.txt');
+  ask('Who founded Acme Corp?');
+  await screen.findByText('Ada founded Acme Corp.');
+  ask('When did they buy Beta Inc?');
+  await screen.findByRole('button', { name: 'Searching…' });
+  first.unmount(); // the page is closed mid-answer
+
+  render(<App />);
+  const row = await within(screen.getByRole('navigation', { name: 'Chats' })).findByTitle('Who founded Acme Corp?');
+  expect(screen.queryAllByRole('article')).toHaveLength(0); // a reload opens a new chat
+  fireEvent.click(row);
+  const turns = screen.getAllByRole('article');
+  expect(turns).toHaveLength(2);
+  expect(within(turns[0]).getByText('Ada founded Acme Corp.')).toBeInTheDocument();
+  expect(within(turns[1]).getByRole('alert')).toHaveTextContent('This answer was interrupted');
+});
+
+test('one search at a time: another chat waits, and the running answer keeps writing into its own chat', async () => {
+  const held = heldSearch();
+  routeSearches((prompt) => (prompt === 'Who founded Acme Corp?' ? held.response
+    : sseResponse([['done', { answer: 'Tea is a drink.' }]])));
+  await openMyFiles();
+
+  ask('Who founded Acme Corp?');
+  await screen.findByRole('button', { name: 'Searching…' });
+  fireEvent.click(screen.getByRole('button', { name: '+ New chat' }));
+  const nav = screen.getByRole('navigation', { name: 'Chats' });
+  expect(within(nav).getByLabelText('Answering')).toBeInTheDocument();
+
+  // The new chat can type, but not send, until the other answer is done
+  const input = screen.getByPlaceholderText(/uploaded files/);
+  fireEvent.change(input, { target: { value: 'What is tea?' } });
+  expect(screen.getByRole('button', { name: 'Waiting…' })).toBeDisabled();
+  expect(screen.getByText(/“Who founded Acme Corp\?” is still being answered/)).toBeInTheDocument();
+  fireEvent.keyDown(input, { key: 'Enter' });
+  expect(searchBodies()).toHaveLength(1);
+
+  await act(async () => { held.finish({ answer: 'Ada founded Acme Corp.' }); });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Search' })).toBeEnabled());
+  expect(within(nav).queryByLabelText('Answering')).not.toBeInTheDocument();
+  ask('What is tea?');
+  await screen.findByText('Tea is a drink.');
+
+  // The first chat got its answer while it wasn't open
+  fireEvent.click(screen.getByTitle('Who founded Acme Corp?'));
+  expect(screen.getByText('Ada founded Acme Corp.')).toBeInTheDocument();
+});
+
+test('sources and evidence from a file deleted later say it is no longer available', async () => {
+  window.confirm = jest.fn(() => true);
+  const uri = `s3://rag-datasets/uploads/${CORPUS}/${CINEMA}/cinema.txt`;
+  routeSearches(() => sseResponse([['done', {
+    answer: 'Hollywood overtook Europe.', sources: [uri],
+    chunks: [{ chunkId: `${CINEMA}:0`, content: 'Hollywood overtook Europe.', source: uri,
+      milvusScore: 1, pagerankScore: 1, hybridScore: 1 }],
+  }]]));
+  await openMyFiles();
+  ask('Who overtook Europe?');
+  await screen.findByText('Evidence (1 chunks)');
+  const turn = screen.getByRole('article');
+  expect(within(turn).getByRole('link', { name: /cinema\.txt/ })).toBeInTheDocument();
+  expect(within(turn).getByRole('button', { name: 'View full source' })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByLabelText('Select cinema.txt'));
+  fireEvent.click(screen.getByRole('button', { name: 'Delete (1)' }));
+  await waitFor(() => expect(screen.queryByLabelText('Select cinema.txt')).not.toBeInTheDocument());
+
+  expect(within(turn).queryByRole('link', { name: /cinema\.txt/ })).not.toBeInTheDocument();
+  expect(within(turn).getByText('No longer available: the file was deleted')).toBeInTheDocument();
+  expect(within(turn).getByText('File deleted')).toBeInTheDocument();
+  expect(within(turn).getByText('Hollywood overtook Europe.', { selector: '.evidence-snippet' })).toBeInTheDocument();
+  expect(within(turn).queryByRole('button', { name: 'View full source' })).not.toBeInTheDocument();
+  expect(within(turn).queryByRole('button', { name: 'Show in map' })).not.toBeInTheDocument();
+});
+
+test('chats can be renamed and deleted', async () => {
+  window.confirm = jest.fn(() => true);
+  routeSearches(() => sseResponse([['done', { answer: 'Ada founded Acme Corp.' }]]));
+  await openMyFiles();
+  ask('Who founded Acme Corp?');
+  await screen.findByText('Ada founded Acme Corp.');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Rename Who founded Acme Corp?' }));
+  const name = screen.getByLabelText('Chat name');
+  fireEvent.change(name, { target: { value: 'Acme notes' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
+  expect(chatRows()).toEqual(['Acme notes']);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Delete Acme notes' }));
+  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('Acme notes'));
+  expect(chatRows()).toEqual([]);
+  expect(screen.queryAllByRole('article')).toHaveLength(0); // the open chat was deleted: a new one opens
 });
 
 test('select all toggles every file', async () => {

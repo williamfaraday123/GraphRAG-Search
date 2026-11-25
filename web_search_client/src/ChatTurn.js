@@ -1,6 +1,6 @@
-import { useCallback, useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import Markdown, { parseOptionChecks, renderInline, splitAnswer } from './Markdown';
-import { formatSourceLabel, sourcePageHref, sourcePath } from './sourceLabel';
+import { formatSourceLabel, sourcePageHref, sourcePath, uploadFileId } from './sourceLabel';
 
 const AGENT_LABELS = {
   rewriter: 'Rewriter',
@@ -22,15 +22,23 @@ const STAGE_INDEX = { PLANNING: 0, RETRIEVING: 1, ITERATING: 1, ANALYZING: 2, SY
  *
  * turn: { id, question, searchedAs, status, agentSteps, text, sources, chunks, graphPaths,
  *         graphSeeds, confidence, error, done }
+ * availableFileIds: ids of the workspace's files right now (null = not known yet, or the wiki).
+ *   Sources and evidence from a file that has since been deleted keep their stored text but
+ *   say the file is no longer available, instead of offering links that would fail.
+ *
+ * Memoised: a streamed token changes only the turn being written, so earlier turns (and other
+ * chats) are not redrawn while an answer streams in.
  */
-export default function ChatTurn({
+function ChatTurn({
   turn, mode, mapOpen, pinnedHighlight, hoverProps, toggleShowInMap, sourceCache, fetchChunkSource,
+  availableFileIds,
 }) {
   const [expandedChunks, setExpandedChunks] = useState(() => new Set());
   const {
     id, question, searchedAs, status, agentSteps, text, sources, chunks, graphPaths, graphSeeds,
     confidence, error, done,
   } = turn;
+  const isGone = (fileId) => Boolean(availableFileIds && fileId && !availableFileIds.has(fileId));
 
   const toggleChunkSource = useCallback((chunk, idx) => {
     setExpandedChunks((prev) => {
@@ -176,7 +184,14 @@ export default function ChatTurn({
               <div className="sources-section">
                 <h3>Sources</h3>
                 <ul className="sources-list">
-                  {sources.map((src, i) => (
+                  {sources.map((src, i) => (isGone(uploadFileId(src)) ? (
+                    <li key={i} className="source-item">
+                      <span className="source-link is-gone" title="This file was deleted from your workspace">
+                        <span className="source-name">{formatSourceLabel(src)}</span>
+                        <span className="source-text">No longer available: the file was deleted</span>
+                      </span>
+                    </li>
+                  ) : (
                     <li key={i} className="source-item">
                       {/* Opens the full text on its own page in a new tab */}
                       <a
@@ -191,7 +206,7 @@ export default function ChatTurn({
                         <span className="visually-hidden"> (opens in a new tab)</span>
                       </a>
                     </li>
-                  ))}
+                  )))}
                 </ul>
               </div>
             )}
@@ -285,7 +300,8 @@ export default function ChatTurn({
                     {chunks.map((c, i) => {
                       const cached = c.source ? sourceCache[c.source] : null;
                       const isExpanded = expandedChunks.has(i);
-                      const mappable = mode === 'files' && Boolean(c.chunkId);
+                      const gone = isGone(uploadFileId(c.source) || (c.chunkId || '').split(':')[0]);
+                      const mappable = mode === 'files' && Boolean(c.chunkId) && !gone;
                       const highlight = c.chunkId ? chunkHighlight(c.chunkId) : null;
                       const pinned = mappable && pinnedHighlight?.key === highlight.key;
                       return (
@@ -303,6 +319,11 @@ export default function ChatTurn({
                                 Found via knowledge graph
                               </span>
                             )}
+                            {gone && (
+                              <span className="evidence-badge-gone" title="The text below is what was found when the question was asked">
+                                File deleted
+                              </span>
+                            )}
                           </div>
                           <p className="evidence-snippet">{c.content}</p>
                           <div className="evidence-scores">
@@ -314,7 +335,7 @@ export default function ChatTurn({
                             <span className="score-hybrid">Hybrid {Math.round((c.hybridScore || 0) * 100)}%</span>
                           </div>
                           <div className="evidence-actions">
-                            {c.source && (
+                            {c.source && !gone && (
                               <button
                                 type="button"
                                 className="evidence-toggle"
@@ -355,3 +376,5 @@ export default function ChatTurn({
     </article>
   );
 }
+
+export default memo(ChatTurn);

@@ -32,7 +32,7 @@ The system turns source documents into a searchable knowledge base, then combine
 
 | Component | Responsibility | Main implementation |
 |---|---|---|
-| React web client | Collects a query and renders progress, streamed answer text, and ranked evidence. | `web_search_client/` |
+| React web client | A chat: collects questions and renders progress, streamed answer text, and ranked evidence for each. Keeps several chats in a sidebar, saved in the browser's IndexedDB (`chatStore.js`), never on the server. Runs one search at a time across all chats. | `web_search_client/` |
 | Orchestration layer | Public HTTP API. Converts the Python gRPC response stream into browser-friendly Server-Sent Events (SSE). It also proxies source-document requests. | `orchestration_layer/` |
 | Query processor | Runs retrieval, graph-aware ranking, and answer generation. It exposes the gRPC contract shared with Spring Boot. | `query_processor/app/` and `query_processor/proto/query.proto` |
 | Wiki build | Offline: indexes each WikiText article like an upload and extracts its knowledge graph. | `query_processor/app/build_wiki.py`, `docker-compose.wiki-build.yml` |

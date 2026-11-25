@@ -17,10 +17,10 @@ test('shows the full text of a source with its file name, path and word count', 
   expect(document.title).toBe('report.pdf · GraphRAG Search');
 });
 
-test('reports a source that cannot be found', async () => {
+test('reports a source that cannot be found (e.g. its file was deleted after a saved chat used it)', async () => {
   global.fetch = jest.fn(() => Promise.resolve({
-    ok: true, json: () => Promise.resolve({ found: false, error: 'Failed to fetch source' }),
+    ok: true, json: () => Promise.resolve({ found: false, error: 'NoSuchKey' }),
   }));
   render(<SourceView uri={URI} />);
-  expect(await screen.findByRole('alert')).toHaveTextContent('Failed to fetch source');
+  expect(await screen.findByRole('alert')).toHaveTextContent('This source is no longer available');
 });

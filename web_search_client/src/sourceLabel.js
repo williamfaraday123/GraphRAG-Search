@@ -12,6 +12,13 @@ export function formatSourceLabel(source) {
   return upload[1].replace(/(\.(?:txt|md|pdf|docx|mp3))\.txt$/i, '$1');
 }
 
+/** The upload file id in a source URI (s3://bucket/uploads/<corpus>/<file>/<name>), or null
+ *  for wiki sources. */
+export function uploadFileId(source) {
+  const match = (source || '').match(/\/uploads\/[^/]+\/([^/]+)\/[^/]+$/);
+  return match ? match[1] : null;
+}
+
 /** The path without the s3:// prefix, for showing where a source is stored. */
 export const sourcePath = (source) => (source || '').replace(/^s3:\/\//, '');
 

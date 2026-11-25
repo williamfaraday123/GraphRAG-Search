@@ -23,7 +23,8 @@ function SourceView({ uri }) {
       .then((data) => {
         if (!active) return;
         if (data.found) setState({ loading: false, content: data.content, error: null });
-        else setState({ loading: false, content: null, error: data.error || 'Source not found' });
+        // Answers in saved chats keep their sources after the file is deleted
+        else setState({ loading: false, content: null, error: 'This source is no longer available. Its file may have been deleted from your workspace.' });
       })
       .catch((err) => active && setState({ loading: false, content: null, error: err.message }));
     return () => { active = false; };

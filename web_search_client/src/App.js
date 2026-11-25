@@ -1,13 +1,18 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import './App.css';
+import ChatSidebar from './ChatSidebar';
 import ChatTurn from './ChatTurn';
 import CorpusMap from './CorpusMap';
 import { API_BASE } from './config';
+import { deleteChat as deleteStoredChat, loadChats, saveChat } from './chatStore';
 
 // Follow-ups: the last few questions and the start of their answers go with each search, so
 // the query processor can rewrite "When did they buy it?" (it uses at most 3 turns)
 const MAX_TURNS = 3;
 const MAX_ANSWER_CHARS = 300;
+const MAX_TITLE_CHARS = 60;
+const INTERRUPTED = 'This answer was interrupted: the page was closed or reloaded before it finished.';
+const ENDED_EARLY = 'The search ended before an answer arrived. Try asking again.';
 
 function trimAnswer(text) {
   const flat = text.replace(/\s+/g, ' ').trim();
@@ -16,6 +21,55 @@ function trimAnswer(text) {
   const space = cut.lastIndexOf(' ');
   return `${space > MAX_ANSWER_CHARS / 2 ? cut.slice(0, space) : cut}…`;
 }
+
+let idCounter = 0;
+function newId(prefix) {
+  idCounter += 1;
+  const random = window.crypto?.randomUUID ? window.crypto.randomUUID() : Math.random().toString(36).slice(2);
+  return `${prefix}-${Date.now().toString(36)}-${idCounter}-${random.slice(0, 8)}`;
+}
+
+function titleFrom(question) {
+  const flat = question.replace(/\s+/g, ' ').trim();
+  return flat.length > MAX_TITLE_CHARS ? `${flat.slice(0, MAX_TITLE_CHARS - 1)}…` : flat;
+}
+
+/**
+ * A chat, as kept in memory and saved in IndexedDB (chatStore.js):
+ *   { id, title, mode: 'files' | 'wiki', corpusId, fileIds (ticked when last asked),
+ *     createdAt, updatedAt, turns: [turn | { id, divider: true }],
+ *     context: [{ question, answer, entityKeys }] (the last turns sent with a follow-up) }
+ * A turn is what ChatTurn shows: { id, question, searchedAs, status, agentSteps, text,
+ *   sources, chunks, graphPaths, graphSeeds, confidence, error, done }.
+ */
+function emptyChat(id, mode) {
+  const now = Date.now();
+  return { id, title: '', mode, corpusId: '', fileIds: [], createdAt: now, updatedAt: now, turns: [], context: [] };
+}
+
+// A turn still being written when the page closed can't be resumed: say so instead of
+// showing it as if it were still running
+function markInterrupted(chat) {
+  if (!chat.turns.some((t) => !t.divider && !t.done && !t.error)) return chat;
+  return {
+    ...chat,
+    turns: chat.turns.map((t) => (t.divider || t.done || t.error ? t : { ...t, status: null, error: INTERRUPTED })),
+  };
+}
+
+function patchTurn(chat, turnId, change) {
+  return {
+    ...chat,
+    turns: chat.turns.map((t) => (t.id === turnId
+      ? { ...t, ...(typeof change === 'function' ? change(t) : change) }
+      : t)),
+  };
+}
+
+// The sidebar is drawn from a string of what it shows (id, title, mode, time per chat), so a
+// streamed token, which changes none of these, doesn't redraw it
+const FIELD_SEP = '\u0001';
+const ROW_SEP = '\u0002';
 
 function App() {
   const [query, setQuery] = useState('');
@@ -26,6 +80,7 @@ function App() {
   const [corpusError, setCorpusError] = useState(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [filesLoaded, setFilesLoaded] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadFeedback, setUploadFeedback] = useState(null);
   // Checked files: the targets for Preview/Delete, and the query scope (none checked = all files)
@@ -46,18 +101,35 @@ function App() {
   const [scrollToPreview, setScrollToPreview] = useState(0);
   const previewRef = useRef(null);
   const [sourceCache, setSourceCache] = useState({}); // uri -> { loading, content, error }
-  const [isLoading, setIsLoading] = useState(false);
-  // The chat on screen, oldest first: each question with its progress, answer and evidence
-  // (ChatTurn), or { id, divider: true } where "New topic" was pressed
-  const [turns, setTurns] = useState([]);
-  // Earlier turns sent with each follow-up: {question, answer (trimmed), entityKeys}, oldest first
-  const [conversation, setConversation] = useState([]);
-  const turnCounter = useRef(0);
-  const eventSourceRef = useRef(null);
+
+  // Chats by id. The open chat may be a new one that has no question yet and isn't saved.
+  const [chats, setChats] = useState({});
+  const [activeId, setActiveId] = useState(() => newId('chat'));
+  const [chatsLoaded, setChatsLoaded] = useState(false);
+  // The one search that runs at a time (the local model answers one question at once):
+  // { chatId, turnId }. It keeps writing into its chat while another chat is open.
+  const [running, setRunning] = useState(null);
+  const abortRef = useRef(null);
+  const savedRef = useRef(new Map()); // chat id -> the chat object last written to IndexedDB
+  // Latest values for callbacks that must stay the same function (memoised sidebar rows)
+  const chatsRef = useRef(chats);
+  const activeIdRef = useRef(activeId);
+  const runningRef = useRef(running);
+  chatsRef.current = chats;
+  activeIdRef.current = activeId;
+  runningRef.current = running;
+  const [sidebarOpen, setSidebarOpen] = useState(false); // narrow screens: chats drawer
   const scrollRef = useRef(null);       // the scrolling chat area
   const latestTurnRef = useRef(null);
+  const shownChatRef = useRef(activeId);
   const [atBottom, setAtBottom] = useState(true);
   const inputRef = useRef(null);
+
+  const activeChat = chats[activeId] || null;
+  const turns = activeChat ? activeChat.turns : [];
+  const context = activeChat ? activeChat.context : [];
+  const isLoading = Boolean(running);
+  const runningElsewhere = Boolean(running && running.chatId !== activeId);
 
   useEffect(() => {
     if (!corpusId) return undefined;
@@ -71,6 +143,7 @@ function App() {
         const files = await response.json();
         if (active) {
           setUploadedFiles(files);
+          setFilesLoaded(true);
           // Drop selections for files that no longer exist (e.g. deleted in another tab)
           const ids = new Set(files.map((f) => f.fileId));
           setSelectedFileIds((prev) => new Set([...prev].filter((id) => ids.has(id))));
@@ -85,33 +158,66 @@ function App() {
     return () => { active = false; };
   }, [corpusId]);
 
+  // Saved chats, from this browser's database
   useEffect(() => {
-    return () => {
-      if (eventSourceRef.current) eventSourceRef.current.close();
-    };
+    let active = true;
+    loadChats()
+      .then((list) => {
+        if (!active) return;
+        const loaded = {};
+        list.forEach((stored) => {
+          const chat = markInterrupted(stored);
+          loaded[chat.id] = chat;
+          if (chat === stored) savedRef.current.set(chat.id, chat);
+        });
+        // A chat started before loading finished wins over nothing: ids never collide
+        setChats((prev) => ({ ...loaded, ...prev }));
+      })
+      .catch((err) => console.warn('Could not load saved chats', err))
+      .finally(() => { if (active) setChatsLoaded(true); });
+    return () => { active = false; };
   }, []);
 
-  // Clears the whole chat (switching between My files and the wiki)
-  const clearChat = useCallback(() => {
-    if (eventSourceRef.current) eventSourceRef.current.close();
-    setTurns([]);
-    setConversation([]);
-    setSourceCache({});
-    setHoverHighlight(null);
-    setPinnedHighlight(null);
-    setIsLoading(false);
+  // Save chats that changed. While an answer streams in, its chat is saved when the question
+  // is added (so a reload keeps the question) but not on every token; it is saved again once
+  // the answer is done. Chats without a question are not saved.
+  useEffect(() => {
+    if (!chatsLoaded) return;
+    Object.values(chats).forEach((chat) => {
+      if (!chat.turns.length) return;
+      const saved = savedRef.current.get(chat.id);
+      if (saved === chat) return;
+      if (running?.chatId === chat.id && saved && saved.turns.length === chat.turns.length) return;
+      savedRef.current.set(chat.id, chat);
+      saveChat(chat).catch((err) => console.warn('Could not save chat', err));
+    });
+  }, [chats, running, chatsLoaded]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  const updateChat = useCallback((chatId, change) => {
+    setChats((prev) => (prev[chatId]
+      ? { ...prev, [chatId]: { ...prev[chatId], ...change(prev[chatId]) } }
+      : prev));
   }, []);
 
-  const updateTurn = useCallback((id, change) => {
-    setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...(typeof change === 'function' ? change(t) : change) } : t)));
+  const updateTurn = useCallback((chatId, turnId, change) => {
+    setChats((prev) => (prev[chatId] ? { ...prev, [chatId]: patchTurn(prev[chatId], turnId, change) } : prev));
   }, []);
 
   const mapOpen = showMap && mode === 'files';
 
-  // A new question scrolls up to the top of the view, so its answer is written below it
+  // Opening a chat shows its latest turn; a new question scrolls up to the top of the view,
+  // so its answer is written below it
   useEffect(() => {
+    if (shownChatRef.current !== activeId) {
+      shownChatRef.current = activeId;
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+      return;
+    }
     if (latestTurnRef.current) latestTurnRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
-  }, [turns.length]);
+  }, [turns.length, activeId]);
 
   const onChatScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -174,15 +280,22 @@ function App() {
     setHoverHighlight(null);
   }, []);
 
-  // Hover handlers that highlight something in the open corpus map
-  const hoverProps = (highlight) => (mapOpen
+  // Hover handlers that highlight something in the open corpus map (the same function until
+  // the map opens or closes, so finished turns aren't redrawn)
+  const hoverProps = useCallback((highlight) => (mapOpen
     ? {
       onMouseEnter: () => setHoverHighlight(highlight),
       onMouseLeave: () => setHoverHighlight(null),
       onFocus: () => setHoverHighlight(highlight),
       onBlur: () => setHoverHighlight(null),
     }
-    : {});
+    : {}), [mapOpen]);
+
+  // Files in the workspace right now: sources and evidence from deleted files say so
+  const availableFileIds = useMemo(
+    () => (mode === 'files' && filesLoaded ? new Set(uploadedFiles.map((f) => f.fileId)) : null),
+    [mode, filesLoaded, uploadedFiles],
+  );
 
   // "My files" needs an upload workspace: created on first use (on page load, since it's
   // the default mode) and remembered in local storage. The ref stops a second request while
@@ -211,10 +324,15 @@ function App() {
     if (mode === 'files') ensureWorkspace();
   }, [mode, ensureWorkspace]);
 
+  // Each chat searches one corpus. Switching with questions already asked starts a new chat
+  // for the other corpus; the current one stays in the sidebar (and keeps running if it is).
   const chooseMode = useCallback((nextMode) => {
-    if (nextMode !== mode) clearChat(); // the chat was about the other corpus
+    if (nextMode === mode) return;
+    if (chats[activeId]?.turns.length) setActiveId(newId('chat'));
+    setPinnedHighlight(null);
+    setHoverHighlight(null);
     setMode(nextMode);
-  }, [mode, clearChat]);
+  }, [mode, chats, activeId]);
 
   const handleUpload = useCallback(async (e) => {
     e.preventDefault();
@@ -335,34 +453,52 @@ function App() {
 
   const handleSearch = useCallback((e) => {
     e.preventDefault();
-    if (!query.trim() || isLoading || (mode === 'files' && !uploadedFiles.length)) return;
+    // One search at a time, across all chats
+    if (!query.trim() || running || (mode === 'files' && !uploadedFiles.length)) return;
 
     const asked = query.trim();
-    turnCounter.current += 1;
-    const turnId = turnCounter.current;
-    setTurns((prev) => [...prev, {
-      id: turnId, question: asked, searchedAs: '', status: null, agentSteps: [], text: '',
-      sources: [], chunks: [], graphPaths: [], graphSeeds: [], confidence: null, error: null, done: false,
-    }]);
+    const chatId = activeId;
+    const turnId = newId('turn');
+    const fileIds = mode === 'files'
+      ? uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)
+      : [];
+    // Earlier turns of this chat, so "When did they buy it?" can be resolved; empty at first
+    const history = (chats[chatId]?.context || []).slice(-MAX_TURNS);
+    setChats((prev) => {
+      const chat = prev[chatId] || emptyChat(chatId, mode);
+      return {
+        ...prev,
+        [chatId]: {
+          ...chat,
+          title: chat.title || titleFrom(asked),
+          mode,
+          corpusId: mode === 'wiki' ? 'wiki' : corpusId,
+          fileIds,
+          updatedAt: Date.now(),
+          turns: [...chat.turns, {
+            id: turnId, question: asked, searchedAs: '', status: null, agentSteps: [], text: '',
+            sources: [], chunks: [], graphPaths: [], graphSeeds: [], confidence: null, error: null, done: false,
+          }],
+        },
+      };
+    });
     setQuery('');
-    setIsLoading(true);
-    const handleSSEEvent = (eventType, data) => handleTurnEvent(turnId, asked, eventType, data);
+    setRunning({ chatId, turnId });
+    const handleSSEEvent = (eventType, data) => handleTurnEvent(chatId, turnId, asked, eventType, data);
 
     const controller = new AbortController();
+    abortRef.current = controller;
 
     fetch(`${API_BASE}/api/v1/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({
         prompt: asked,
-        // Earlier turns, so "When did they buy it?" can be resolved; empty for the first question
-        history: conversation.slice(-MAX_TURNS),
+        history,
         topK: 5,
         corpusId: mode === 'wiki' ? 'wiki' : corpusId,
         // Checked files scope the question; none checked = search every uploaded file
-        fileIds: mode === 'files'
-          ? uploadedFiles.filter((f) => selectedFileIds.has(f.fileId)).map((f) => f.fileId)
-          : [],
+        fileIds,
       }),
       signal: controller.signal,
     })
@@ -415,52 +551,59 @@ function App() {
         dispatch();
       })
       .catch((err) => {
-        if (err.name !== 'AbortError') updateTurn(turnId, { error: err.message, status: null });
+        if (err.name !== 'AbortError') updateTurn(chatId, turnId, { error: err.message, status: null });
       })
-      .finally(() => setIsLoading(false));
-
-    eventSourceRef.current = { close: () => controller.abort() };
+      .finally(() => {
+        // A stream that closed without "done" or "error" leaves no answer: say so
+        updateTurn(chatId, turnId, (t) => (t.done || t.error ? {} : { status: null, error: ENDED_EARLY }));
+        setRunning((r) => (r && r.turnId === turnId ? null : r));
+        if (abortRef.current === controller) abortRef.current = null;
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, isLoading, mode, corpusId, uploadedFiles, selectedFileIds, conversation, updateTurn]);
+  }, [query, running, mode, activeId, chats, corpusId, uploadedFiles, selectedFileIds, updateTurn]);
 
-  // Streamed events update only the turn they belong to; earlier turns keep what they showed
-  const handleTurnEvent = (turnId, asked, eventType, data) => {
+  // Streamed events update only the turn they belong to, in its own chat (which may no longer
+  // be the one on screen); earlier turns keep what they showed
+  const handleTurnEvent = (chatId, turnId, asked, eventType, data) => {
     switch (eventType) {
       case 'status':
-        updateTurn(turnId, { status: { stage: data.stage, message: data.message } });
+        updateTurn(chatId, turnId, { status: { stage: data.stage, message: data.message } });
         break;
       case 'agent_step':
-        updateTurn(turnId, (t) => ({ agentSteps: [...t.agentSteps, { agent: data.agent, detail: data.detail }] }));
+        updateTurn(chatId, turnId, (t) => ({ agentSteps: [...t.agentSteps, { agent: data.agent, detail: data.detail }] }));
         break;
       case 'chunk':
-        updateTurn(turnId, (t) => ({ text: t.text + data.content }));
+        updateTurn(chatId, turnId, (t) => ({ text: t.text + data.content }));
         break;
       case 'done': {
         const standalone = (data.standaloneQuery || asked).trim();
-        updateTurn(turnId, (t) => ({
-          // The full answer is authoritative (keeps every line break, even if a chunk was lost)
-          text: data.answer || t.text,
-          done: true,
-          status: null,
-          sources: data.sources || [],
-          chunks: data.chunks || [],
-          graphPaths: data.graphPaths || [],
-          graphSeeds: data.graphSeeds || [],
-          confidence: data.confidence ?? null,
-          searchedAs: standalone.toLowerCase() !== asked.toLowerCase() ? standalone : '',
+        updateChat(chatId, (chat) => ({
+          ...patchTurn(chat, turnId, (t) => ({
+            // The full answer is authoritative (keeps every line break, even if a chunk was lost)
+            text: data.answer || t.text,
+            done: true,
+            status: null,
+            sources: data.sources || [],
+            chunks: data.chunks || [],
+            graphPaths: data.graphPaths || [],
+            graphSeeds: data.graphSeeds || [],
+            confidence: data.confidence ?? null,
+            searchedAs: standalone.toLowerCase() !== asked.toLowerCase() ? standalone : '',
+          })),
+          // The next question in this chat sees this one as the search understood it
+          context: [...chat.context, {
+            question: standalone,
+            answer: trimAnswer(data.answer || ''),
+            entityKeys: data.entityKeys || [],
+          }].slice(-MAX_TURNS),
+          updatedAt: Date.now(),
         }));
-        setIsLoading(false);
-        // The next question sees this one as the search understood it
-        setConversation((prev) => [...prev, {
-          question: standalone,
-          answer: trimAnswer(data.answer || ''),
-          entityKeys: data.entityKeys || [],
-        }].slice(-MAX_TURNS));
+        setRunning((r) => (r && r.turnId === turnId ? null : r));
         break;
       }
       case 'error':
-        updateTurn(turnId, { error: data.message, status: null });
-        setIsLoading(false);
+        updateTurn(chatId, turnId, { error: data.message, status: null });
+        setRunning((r) => (r && r.turnId === turnId ? null : r));
         break;
       default:
         break;
@@ -468,12 +611,77 @@ function App() {
   };
 
   const startNewTopic = useCallback(() => {
-    setConversation([]);
-    turnCounter.current += 1;
-    const id = turnCounter.current;
-    setTurns((prev) => (prev.length && !prev[prev.length - 1].divider ? [...prev, { id, divider: true }] : prev));
+    updateChat(activeId, (chat) => ({
+      context: [],
+      turns: chat.turns.length && !chat.turns[chat.turns.length - 1].divider
+        ? [...chat.turns, { id: newId('turn'), divider: true }]
+        : chat.turns,
+    }));
+    inputRef.current?.focus();
+  }, [activeId, updateChat]);
+
+  // --- Chats (sidebar). These keep the same function between renders, reading the latest
+  // state from refs, so the memoised sidebar rows aren't redrawn by a streaming answer.
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+
+  const openChat = useCallback((id) => {
+    const chat = chatsRef.current[id];
+    setSidebarOpen(false);
+    if (!chat || id === activeIdRef.current) return;
+    setActiveId(id);
+    setPinnedHighlight(null);
+    setHoverHighlight(null);
+    setMode(chat.mode);
+    // Back to the files this chat last searched (none ticked = all files)
+    if (chat.mode === 'files') setSelectedFileIds(new Set(chat.fileIds || []));
+  }, []);
+
+  const startNewChat = useCallback(() => {
+    setSidebarOpen(false);
+    const current = chatsRef.current[activeIdRef.current];
+    if (current && current.turns.length) {
+      setActiveId(newId('chat'));
+      setQuery('');
+      setPinnedHighlight(null);
+      setHoverHighlight(null);
+    }
     inputRef.current?.focus();
   }, []);
+
+  const renameChat = useCallback((id, title) => {
+    setChats((prev) => (prev[id] ? { ...prev, [id]: { ...prev[id], title } } : prev));
+  }, []);
+
+  const removeChat = useCallback((id) => {
+    const chat = chatsRef.current[id];
+    if (!chat) return;
+    if (!window.confirm(`Delete the chat “${chat.title}”? This can't be undone.`)) return;
+    if (runningRef.current?.chatId === id) {
+      abortRef.current?.abort();
+      setRunning(null);
+    }
+    setChats((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    savedRef.current.delete(id);
+    deleteStoredChat(id).catch((err) => console.warn('Could not delete chat', err));
+    if (activeIdRef.current === id) setActiveId(newId('chat'));
+  }, []);
+
+  // Sidebar rows, newest first; recomputed only when a title, mode or time changes
+  const sidebarKey = Object.values(chats)
+    .filter((c) => c.turns.length)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map((c) => [c.id, c.title, c.mode, c.updatedAt].join(FIELD_SEP))
+    .join(ROW_SEP);
+  const sidebarItems = useMemo(() => (sidebarKey
+    ? sidebarKey.split(ROW_SEP).map((row) => {
+      const [id, title, chatMode, updatedAt] = row.split(FIELD_SEP);
+      return { id, title, mode: chatMode, updatedAt: Number(updatedAt) };
+    })
+    : []), [sidebarKey]);
 
   // Enter sends, Shift+Enter starts a new line (like other chat apps)
   const onComposerKeyDown = useCallback((e) => {
@@ -499,7 +707,7 @@ function App() {
           ...prev,
           [uri]: data.found
             ? { loading: false, content: data.content, error: null }
-            : { loading: false, content: null, error: data.error || 'Source not found' },
+            : { loading: false, content: null, error: 'This source is no longer available. Its file may have been deleted.' },
         }));
       })
       .catch((err) => {
@@ -507,12 +715,30 @@ function App() {
       });
   }, []);
 
+  const runningTitle = running ? chats[running.chatId]?.title || 'another chat' : '';
+
   return (
     <div className="app-shell">
+      <ChatSidebar
+        items={sidebarItems}
+        activeId={activeId}
+        runningId={running?.chatId || null}
+        open={sidebarOpen}
+        onNew={startNewChat}
+        onSelect={openChat}
+        onRename={renameChat}
+        onDelete={removeChat}
+        onClose={closeSidebar}
+      />
+      {sidebarOpen && <div className="sidebar-backdrop" onClick={closeSidebar} aria-hidden="true" />}
+      <div className="main-pane">
       <div className="chat-scroll" ref={scrollRef} onScroll={onChatScroll}>
         <div className="app-container">
           <div className="app-top">
           <header className="app-header">
+            <button type="button" className="chats-toggle" onClick={() => setSidebarOpen(true)}>
+              ☰ Chats
+            </button>
             <h1>GraphRAG Search</h1>
             <p className="brand-subtitle">
               Answers from your own files or a set of Wikipedia articles. Passages are ranked by how
@@ -692,6 +918,7 @@ function App() {
                     toggleShowInMap={toggleShowInMap}
                     sourceCache={sourceCache}
                     fetchChunkSource={fetchChunkSource}
+                    availableFileIds={availableFileIds}
                   />
                 </div>
               );
@@ -720,6 +947,15 @@ function App() {
             </button>
           )}
           <form className="search-form" onSubmit={handleSearch}>
+            {runningElsewhere && (
+              <p className="busy-note" role="status">
+                “{runningTitle}” is still being answered. You can type your question now and send it
+                when that answer finishes.
+                <button type="button" className="file-action" onClick={() => openChat(running.chatId)}>
+                  Open it
+                </button>
+              </p>
+            )}
             <div className="search-bar">
               <textarea
                 ref={inputRef}
@@ -739,19 +975,19 @@ function App() {
                 className="search-button"
                 disabled={isLoading || !query.trim() || (mode === 'files' && !uploadedFiles.length)}
               >
-                {isLoading ? 'Searching…' : 'Search'}
+                {runningElsewhere ? 'Waiting…' : isLoading ? 'Searching…' : 'Search'}
               </button>
             </div>
             <p className="chat-context">
-              {conversation.length > 0 ? (
+              {context.length > 0 ? (
                 <>
-                  Follow-up questions can refer to your last {conversation.length === 1
-                    ? 'question' : `${conversation.length} questions`}.
+                  Follow-up questions can refer to your last {context.length === 1
+                    ? 'question' : `${context.length} questions`}.
                   <button
                     type="button"
                     className="file-action chat-reset"
                     onClick={startNewTopic}
-                    disabled={isLoading}
+                    disabled={running?.chatId === activeId}
                   >
                     New topic
                   </button>
@@ -762,6 +998,7 @@ function App() {
             </p>
           </form>
         </div>
+      </div>
       </div>
     </div>
   );
