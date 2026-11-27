@@ -17,6 +17,13 @@ RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/wh
 
 COPY . .
 
+# The shared core (core/ in the repo; local push PPR, chat client). It's outside this build
+# context, so it comes in as a named context:
+#   docker compose: additional_contexts core: ./core (docker-compose.yml)
+#   docker buildx build --build-context core=core ...
+COPY --from=core graphrag_core /core/graphrag_core
+ENV PYTHONPATH=/core
+
 # Generate gRPC stubs from proto during build
 RUN python -m grpc_tools.protoc -I proto --python_out=app --grpc_python_out=app proto/query.proto
 

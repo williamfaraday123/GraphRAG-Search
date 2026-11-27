@@ -1,0 +1,10 @@
+# The sidecar runs on the standard library alone (Python only, vectors in SQLite).
+# These add TypeScript/JavaScript/React, and LanceDB for vector search:
+tree-sitter>=0.25
+tree-sitter-python>=0.25
+tree-sitter-typescript>=0.23
+tree-sitter-javascript>=0.25
+lancedb>=0.20
+numpy
+# Optional: a code-aware embedding model (graphragCode.embeddingModel "auto"); large download
+# sentence-transformers

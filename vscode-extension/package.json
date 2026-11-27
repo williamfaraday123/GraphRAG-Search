@@ -1,0 +1,126 @@
+{
+  "name": "graphrag-code",
+  "displayName": "GraphRAG Code",
+  "description": "Ask about and edit a codebase in any language through its code graph (tree-sitter for Python and TypeScript/JavaScript, VS Code's language servers for the rest): local push PPR, a coverage check and a verified edit loop, with a local model.",
+  "version": "0.1.0",
+  "publisher": "graphrag-search",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "graphragCode.ask", "title": "Ask About the Code", "category": "GraphRAG Code" },
+      { "command": "graphragCode.edit", "title": "Edit Code…", "category": "GraphRAG Code" },
+      { "command": "graphragCode.showGraph", "title": "Show Graph Around Cursor", "category": "GraphRAG Code" },
+      { "command": "graphragCode.impact", "title": "Show What Depends on This Symbol", "category": "GraphRAG Code" },
+      { "command": "graphragCode.index", "title": "Re-index Workspace", "category": "GraphRAG Code" },
+      { "command": "graphragCode.restoreCheckpoint", "title": "Restore a Checkpoint…", "category": "GraphRAG Code" }
+    ],
+    "menus": {
+      "editor/context": [
+        { "command": "graphragCode.ask", "when": "resourceScheme == file && !(editorLangId =~ /^(markdown|json|jsonc|yaml|xml|html|css|scss|less|plaintext|ini|toml|csv|log)$/)", "group": "graphragCode@1" },
+        { "command": "graphragCode.edit", "when": "resourceScheme == file && !(editorLangId =~ /^(markdown|json|jsonc|yaml|xml|html|css|scss|less|plaintext|ini|toml|csv|log)$/)", "group": "graphragCode@2" },
+        { "command": "graphragCode.impact", "when": "resourceScheme == file && !(editorLangId =~ /^(markdown|json|jsonc|yaml|xml|html|css|scss|less|plaintext|ini|toml|csv|log)$/)", "group": "graphragCode@3" },
+        { "command": "graphragCode.showGraph", "when": "resourceScheme == file && !(editorLangId =~ /^(markdown|json|jsonc|yaml|xml|html|css|scss|less|plaintext|ini|toml|csv|log)$/)", "group": "graphragCode@4" }
+      ]
+    },
+    "configuration": {
+      "title": "GraphRAG Code",
+      "properties": {
+        "graphragCode.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "markdownDescription": "Python 3.10+ that runs the sidecar. Left at `python`, the environment `npm run setup-python` makes (`sidecar/.venv`, with tree-sitter and LanceDB) is used when it exists. Without those packages the sidecar still runs: Python only (ast) and vectors in SQLite."
+        },
+        "graphragCode.parser": {
+          "type": "string",
+          "enum": ["auto", "ast"],
+          "default": "auto",
+          "markdownDescription": "`auto`: tree-sitter (Python, TypeScript, TSX, JavaScript/JSX) when installed, else Python's `ast`. `ast`: Python only, with the standard library."
+        },
+        "graphragCode.languageServers": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Use VS Code's language servers as a graph source: symbols of files no parser reads (any language with a language server extension installed), their callers, callees and type hierarchy fetched as searches reach them, and exact callers that settle the parser's guesses before an edit."
+        },
+        "graphragCode.exploreSteps": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "markdownDescription": "When a question's context has a gap (it names nothing the search could anchor on, or a symbol it's about didn't fit), the model may take this many steps with graph tools (`find`, `callers`, `callees`, `read`) before answering. Each step is one model call. `0`: never; every question is answered from one search."
+        },
+        "graphragCode.vectorStore": {
+          "type": "string",
+          "enum": ["auto", "lancedb", "sqlite"],
+          "default": "auto",
+          "markdownDescription": "Where symbol embeddings are kept and searched. `auto`/`lancedb`: LanceDB (an embedded vector database) when installed, else SQLite. `sqlite`: the index's SQLite file, searched in memory."
+        },
+        "graphragCode.llm.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434/v1",
+          "description": "OpenAI-compatible chat endpoint (Ollama by default)."
+        },
+        "graphragCode.llm.model": {
+          "type": "string",
+          "default": "qwen3:4b-instruct",
+          "description": "Model for answers and edits. Larger models make much better multi-file edits."
+        },
+        "graphragCode.llm.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the endpoint, if it needs one (Ollama doesn't)."
+        },
+        "graphragCode.embeddingModel": {
+          "type": "string",
+          "default": "auto",
+          "markdownDescription": "`auto`: a code-search sentence-transformers model when `sentence-transformers` is installed (downloaded on first use), else identifier hashing. `hashing`: no model. Or any sentence-transformers model name."
+        },
+        "graphragCode.verify.testCommand": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Run after each applied edit, from the workspace folder (for example `python -m pytest -x -q`). A failure goes back to the model with the output. Empty: only the language server's errors are checked."
+        },
+        "graphragCode.verify.maxAttempts": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Proposals per edit request, counting the first: each failed verification asks the model to fix what it found."
+        },
+        "graphragCode.verify.diagnosticsTimeoutSeconds": {
+          "type": "number",
+          "default": 8,
+          "description": "How long to wait for the language server to report errors after an edit."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "bundle-core": "node scripts/bundle-core.js",
+    "setup-python": "node scripts/setup-python.js",
+    "vscode:prepublish": "npm run compile && npm run bundle-core",
+    "test:sidecar": "node scripts/test-sidecar.js",
+    "test": "npm run compile && node scripts/test-sidecar.js && node scripts/smoke.js && node scripts/lsp-test.js && node scripts/checkpoint-test.js",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "cytoscape": "^3.35.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "~5.9.3"
+  }
+}

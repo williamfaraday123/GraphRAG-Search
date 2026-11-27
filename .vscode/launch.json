@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // The VS Code extension (vscode-extension/), run from the repository root. The
+      // development window is its own VS Code instance (own profile folder, your normal
+      // extensions), so it can open this same repository while this window has it open.
+      "name": "GraphRAG Code extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension",
+        "--user-data-dir=${workspaceFolder}/vscode-extension/.vscode-dev/user-data",
+        "--extensions-dir=${userHome}/.vscode/extensions",
+        "${input:project}"
+      ],
+      "outFiles": ["${workspaceFolder}/vscode-extension/out/**/*.js"],
+      "preLaunchTask": "compile the extension"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "project",
+      "type": "promptString",
+      "description": "Folder to open in the development window (the project to ask about and edit)",
+      "default": "${workspaceFolder}"
+    }
+  ]
+}

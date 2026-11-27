@@ -143,6 +143,9 @@ services:
     build:
       context: ./query_processor
       dockerfile: Dockerfile.render
+      # The shared core (PPR, chat client), also used by the VS Code extension
+      additional_contexts:
+        core: ./core
     container_name: ai-query-api
     env_file:
       - .env

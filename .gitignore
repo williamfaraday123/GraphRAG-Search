@@ -18,6 +18,10 @@ ingestion_pipeline/snapshot/
 
 volumes/
 
+# Shared core: editable install metadata and bytecode
+core/*.egg-info/
+__pycache__/
+
 .env
 .env.prod
 

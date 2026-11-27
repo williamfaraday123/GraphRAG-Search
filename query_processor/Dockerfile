@@ -24,6 +24,10 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheel_cache -r requireme
 # Copy all source code (including proto)
 COPY . .
 
+# The shared core (core/ in the repo), passed as a named context: --build-context core=../core
+COPY --from=core graphrag_core /core/graphrag_core
+ENV PYTHONPATH=/core
+
 # Generate gRPC stubs from proto during build
 RUN python -m grpc_tools.protoc -I proto --python_out=app --grpc_python_out=app proto/query.proto
 

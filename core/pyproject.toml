@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graphrag-core"
+version = "0.1.0"
+description = "Shared core of GraphRAG-Search and its VS Code extension: local push PPR, hybrid ranking, coverage check, workflow, events, chat client"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["graphrag_core"]

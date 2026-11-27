@@ -1,0 +1,13 @@
+.vscode/**
+.vscode-dev/**
+src/**
+scripts/**
+sidecar/tests/**
+sidecar/.venv/**
+**/__pycache__/**
+**/*.map
+tsconfig.json
+.gitignore
+node_modules/**
+!node_modules/cytoscape/dist/cytoscape.min.js
+!node_modules/cytoscape/package.json

@@ -1,0 +1,7 @@
+node_modules/
+out/
+*.vsix
+sidecar/vendor/
+sidecar/.venv/
+.vscode-dev/
+__pycache__/

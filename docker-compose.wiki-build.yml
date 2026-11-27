@@ -83,6 +83,8 @@ services:
     build:
       context: ./query_processor
       dockerfile: Dockerfile.render
+      additional_contexts:
+        core: ./core
     command: ["python", "build_wiki.py"]
     env_file:
       - .env

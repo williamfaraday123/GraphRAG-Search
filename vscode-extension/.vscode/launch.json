@@ -1,0 +1,42 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // The development window runs as its own VS Code instance (its own profile folder,
+      // your normal extensions), so it can open a folder that's already open in another
+      // window. Without this, VS Code switches to the window that has the folder open,
+      // where the extension isn't loaded, and the development window closes.
+      "name": "Run Extension on a project",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--user-data-dir=${workspaceFolder}/.vscode-dev/user-data",
+        "--extensions-dir=${userHome}/.vscode/extensions",
+        "${input:project}"
+      ],
+      "outFiles": ["${workspaceFolder}/out/**/*.js"],
+      "preLaunchTask": "npm: compile"
+    },
+    {
+      "name": "Run Extension (open a folder yourself)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--user-data-dir=${workspaceFolder}/.vscode-dev/user-data",
+        "--extensions-dir=${userHome}/.vscode/extensions"
+      ],
+      "outFiles": ["${workspaceFolder}/out/**/*.js"],
+      "preLaunchTask": "npm: compile"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "project",
+      "type": "promptString",
+      "description": "Folder to open in the development window (the project to ask about and edit)",
+      "default": "${workspaceFolder}/.."
+    }
+  ]
+}

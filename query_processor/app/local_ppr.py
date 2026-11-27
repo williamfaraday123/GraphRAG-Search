@@ -14,9 +14,14 @@ probability mass; a node keeps a RESTART share of what it holds and passes the r
 neighbours in proportion to edge weight, and only nodes holding at least EPSILON x degree
 keep passing. Mass fades with every step, so the work depends on EPSILON and RESTART, not
 on the size of the workspace; neighbours are fetched from Neo4j as the push reaches them.
+
+The push itself is shared with the VS Code extension (core/graphrag_core/ppr.py); this module
+supplies the Neo4j neighbourhood.
 """
 import logging
 from collections import defaultdict
+
+from graphrag_core.ppr import push_ppr
 
 logger = logging.getLogger(__name__)
 
@@ -94,40 +99,8 @@ class LocalPPR:
 
     def scores(self, seeds, corpus_id, file_ids=None):
         """PPR from `seeds` ({node: weight}). Returns ({chunk_id: score}, nodes fetched)."""
-        total = sum(w for w in seeds.values() if w > 0)
-        if not total:
-            return {}, 0
-        p = defaultdict(float)
-        r = defaultdict(float)
-        for node, weight in seeds.items():
-            if weight > 0:
-                r[node] += weight / total
-
-        adjacency, degree = {}, {}
-        for _ in range(MAX_ROUNDS):
-            # Unknown degree counts as 1 (the smallest possible) so the node gets fetched
-            active = [u for u, ru in r.items() if ru > 0 and ru >= EPSILON * degree.get(u, 1.0)]
-            unknown = [u for u in active if u not in adjacency]
-            if unknown:
-                if len(adjacency) + len(unknown) > MAX_FETCHED_NODES:
-                    logger.warning("Local PPR stopped at the %d-node fetch limit", MAX_FETCHED_NODES)
-                    break
-                for node, out in self._fetch(unknown, corpus_id, file_ids).items():
-                    adjacency[node] = out
-                    degree[node] = sum(out.values())
-                active = [u for u in active if r[u] >= EPSILON * max(degree[u], 1.0)]
-            if not active:
-                break
-            pushes = []
-            for u in active:
-                ru, r[u] = r[u], 0.0
-                if not degree[u]:
-                    p[u] += ru  # no neighbours (e.g. a one-chunk file before extraction): keep it all
-                    continue
-                p[u] += RESTART * ru
-                pushes.append((u, (1 - RESTART) * ru / degree[u]))
-            for u, share in pushes:
-                for v, weight in adjacency[u].items():
-                    r[v] += share * weight
-
-        return {node[1]: score for node, score in p.items() if node[0] == "c"}, len(adjacency)
+        p, fetched = push_ppr(
+            seeds, lambda nodes: self._fetch(nodes, corpus_id, file_ids),
+            restart=RESTART, epsilon=EPSILON, max_rounds=MAX_ROUNDS, max_nodes=MAX_FETCHED_NODES,
+        )
+        return {node[1]: score for node, score in p.items() if node[0] == "c"}, fetched

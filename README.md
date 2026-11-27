@@ -9,6 +9,15 @@ It has two modes:
 
 Both modes search the same kind of graph, and authority is local push Personalized PageRank over it.
 
+The repository also contains a **VS Code extension for codebases** ([vscode-extension/](vscode-extension/README.md)). It applies the same retrieval to code in any language: a code graph from tree-sitter static analysis for Python and TypeScript/JavaScript/React (calls, component renders, imports, subclassing, type use) and from VS Code's language servers for every other language (fetched lazily as PPR reaches each symbol), embeddings in LanceDB, local push PPR seeded from the question and the cursor, a coverage check that puts every caller of a function in context before it changes, and an edit loop with diff previews, approval, git checkpoints and verification. It's a separate package. The text search and the extension share only [core/](core/graphrag_core) (local push PPR, ranking, coverage check, workflow skeleton, progress events, chat client).
+
+```
+core/                 shared: graphrag_core (standard library only)
+query_processor/      text search (uses core/ for PPR and the chat client)
+orchestration_layer/  web_search_client/  ingestion_pipeline/
+vscode-extension/     the extension: TypeScript client + Python sidecar (uses core/)
+```
+
 This project uses Python 3.12.
 
 <img width="4111" height="1270" alt="image" src="https://github.com/user-attachments/assets/791b172b-8a35-4b39-8470-c47d323bee05" />
@@ -105,7 +114,10 @@ cd query_processor
 python -m venv venv
 venv\Scripts\activate.bat
 pip install -r requirements.txt
+pip install -e ../core
 ```
+
+`core/` is the small shared package (local push PPR, chat client) that the query processor and the [VS Code extension](vscode-extension/README.md) both use.
 
 Generate the Python gRPC stubs from the proto file:
 ```
@@ -334,7 +346,7 @@ These images are `linux/amd64`, which runs on Windows, Linux and Intel Macs. For
 ```powershell
 docker buildx create --use --name multi
 $u = "your-dockerhub-username"
-docker buildx build --platform linux/amd64,linux/arm64 -f query_processor/Dockerfile.render -t "$u/graphrag-query-processor:latest" --push query_processor
+docker buildx build --platform linux/amd64,linux/arm64 -f query_processor/Dockerfile.render --build-context core=core -t "$u/graphrag-query-processor:latest" --push query_processor
 docker buildx build --platform linux/amd64,linux/arm64 -f orchestration_layer/Dockerfile.render -t "$u/graphrag-orchestration:latest" --push orchestration_layer
 docker buildx build --platform linux/amd64,linux/arm64 -f ingestion_pipeline/Dockerfile.neo4j -t "$u/graphrag-wiki-neo4j:latest" --push ingestion_pipeline
 docker buildx build --platform linux/amd64,linux/arm64 -f ingestion_pipeline/Dockerfile -t "$u/graphrag-wiki-restore:latest" --push ingestion_pipeline
