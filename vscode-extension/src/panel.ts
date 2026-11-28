@@ -14,10 +14,19 @@ export type PanelMessage =
   | { type: 'result'; kind: string; result: unknown }
   | { type: 'note'; level: 'info' | 'warning' | 'error' | 'success'; text: string };
 
+export type PanelAction = (msg: any) => Promise<void>;
+
 export class Panel {
   private static current: Panel | undefined;
+  private static action: PanelAction | undefined;
   private queue: PanelMessage[] = [];
   private ready = false;
+
+  /** Handles what the webview asks the extension for besides opening files (the architecture
+   *  view's drill-down, a file's code graph, copying Mermaid). */
+  static onAction(handler: PanelAction): void {
+    Panel.action = handler;
+  }
 
   /** The open panel, if any (without opening one). */
   static existing(): Panel | undefined {
@@ -95,6 +104,14 @@ export class Panel {
       } catch (err: any) {
         void vscode.window.showWarningMessage(`Could not open ${msg.path}: ${err.message}`);
       }
+      return;
+    }
+    if (Panel.action) {
+      try {
+        await Panel.action(msg);
+      } catch (err: any) {
+        this.note('error', err.message);
+      }
     }
   }
 
@@ -119,6 +136,24 @@ export class Panel {
   </header>
   <ol id="steps" class="steps" aria-label="Workflow steps"></ol>
   <div id="notes" aria-live="polite"></div>
+  <section id="arch-section" hidden>
+    <h2>System architecture</h2>
+    <nav id="arch-crumbs" class="crumbs" aria-label="Architecture levels"></nav>
+    <p id="arch-hint" class="hint"></p>
+    <div class="arch-tools">
+      <label><input type="checkbox" id="arch-compose"> docker-compose edges</label>
+      <label><input type="checkbox" id="arch-infra" checked> infrastructure</label>
+      <button id="arch-mermaid" type="button">Copy as Mermaid</button>
+    </div>
+    <div id="arch-legend" class="legend"></div>
+    <div id="arch" class="graph arch" aria-label="Architecture diagram"></div>
+    <div id="arch-details" class="arch-details" aria-live="polite"></div>
+  </section>
+  <section id="components-section" hidden>
+    <h2>Components first</h2>
+    <p class="hint">Top-down retrieval: how relevant each component was to the question, before the code was ranked.</p>
+    <ul id="components" class="symbols"></ul>
+  </section>
   <section id="answer-section" hidden>
     <h2 id="answer-heading">Answer</h2>
     <div id="answer" class="answer"></div>

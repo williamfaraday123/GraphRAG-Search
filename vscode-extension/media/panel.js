@@ -88,10 +88,12 @@
     $('context').innerHTML = '';
     answerText = '';
     $('answer-heading').textContent = kind === 'edit' ? 'Proposed change' : 'Answer';
-    ['answer-section', 'graph-answer-section', 'relations-section', 'impact-section', 'graph-section', 'context-section']
-      .forEach((id) => { $(id).hidden = true; });
-    ['graph-answer', 'folder-links', 'relations'].forEach((id) => { $(id).innerHTML = ''; });
+    ['answer-section', 'graph-answer-section', 'relations-section', 'impact-section', 'graph-section', 'context-section',
+      'arch-section', 'components-section'].forEach((id) => { $(id).hidden = true; });
+    ['graph-answer', 'folder-links', 'relations', 'components', 'arch-details'].forEach((id) => { $(id).innerHTML = ''; });
     if (cy) { cy.destroy(); cy = null; }
+    if (archCy) { archCy.destroy(); archCy = null; }
+    archStack = [];
   }
 
   function onEvent(e) {
@@ -141,7 +143,9 @@
       $('impact').innerHTML = '<li class="why">Nothing in the index depends on it.</li>';
       return;
     }
-    symbolList($('impact'), impact, (a) => `${a.direct ? 'direct dependent' : 'depends on it indirectly'} · PPR ${a.score.toFixed(3)}`);
+    symbolList($('impact'), impact, (a) => (a.via
+      ? `in ${escapeHtml(a.component || 'another component')}, across the boundary: ${escapeHtml(a.via)}`
+      : `${a.direct ? 'direct dependent' : 'depends on it indirectly'} · PPR ${a.score.toFixed(3)}`));
   }
 
   // One edge of the graph as a line; the code it starts from opens on click
@@ -219,8 +223,183 @@
     cy.on('tap', 'node', (evt) => open(evt.target.data('path'), evt.target.data('line')));
   }
 
+  // --- architecture --------------------------------------------------------------------------
+  // Connection kinds: colour, line, width ('count': by how many code references)
+  const ARCH_EDGES = {
+    http: { color: '#4f8fea', style: 'solid', width: 3, label: 'HTTP' },
+    grpc: { color: '#9a6ff0', style: 'solid', width: 3, label: 'gRPC' },
+    process: { color: '#e0a030', style: 'dashed', width: 2.5, label: 'starts a process' },
+    code: { color: '#8a8a8a', style: 'solid', width: 'count', label: 'code references' },
+    datastore: { color: '#2fb383', style: 'solid', width: 2, label: 'datastore' },
+    'model API': { color: '#e05aa0', style: 'dashed', width: 2, label: 'model API' },
+    compose: { color: '#9a9a9a', style: 'dotted', width: 1.2, label: 'docker-compose' },
+  };
+  const ARCH_SHAPES = {
+    code: 'round-rectangle', cluster: 'round-rectangle', module: 'rectangle', datastore: 'barrel', queue: 'tag', service: 'ellipse',
+  };
+  const INFRA = new Set(['datastore', 'queue', 'service']);
+  let archCy = null;
+  let archStack = [];
+
+  function archEdgeWidth(e) {
+    const s = ARCH_EDGES[e.kind];
+    if (!s) return 1.5;
+    return s.width === 'count' ? 1 + Math.min(5, Math.log2(1 + (e.count || 1))) : s.width;
+  }
+
+  function showArchitecture(view) {
+    if (!view) return;
+    $('arch-section').hidden = false;
+    const at = archStack.findIndex((v) => v.node === view.node);
+    if (view.level === 'system') archStack = [view];
+    else if (at >= 0) archStack = archStack.slice(0, at).concat([view]);
+    else archStack.push(view);
+    renderArchitecture();
+  }
+
+  function renderArchitecture() {
+    const view = archStack[archStack.length - 1];
+    $('arch-crumbs').innerHTML = '';
+    archStack.forEach((v, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = v.title;
+      b.disabled = i === archStack.length - 1;
+      b.addEventListener('click', () => { archStack = archStack.slice(0, i + 1); renderArchitecture(); });
+      $('arch-crumbs').appendChild(b);
+      if (i < archStack.length - 1) $('arch-crumbs').appendChild(document.createTextNode(' › '));
+    });
+    const how = { manifests: 'build files and docker-compose services', clusters: 'Leiden clustering of the module graph', folders: 'top-level folders' }[view.method] || view.method;
+    $('arch-hint').textContent = (view.level === 'system'
+      ? `Components from ${how}. Connections: code references (static analysis) and detected runtime links. Click a node or an edge for details and evidence.`
+      : view.grouped
+        ? 'Leiden clusters of this component\'s modules (sub-components). Faded nodes are other components.'
+        : 'Modules of this part. Faded nodes are other components.') + (view.notes && view.notes.length ? ` ${view.notes.join(' ')}` : '');
+    $('arch-details').innerHTML = '';
+    if (typeof cytoscape === 'undefined') {
+      note('warning', 'The graph library could not be loaded.');
+      return;
+    }
+    const showCompose = $('arch-compose').checked;
+    const showInfra = $('arch-infra').checked;
+    const nodes = view.nodes.filter((n) => showInfra || !INFRA.has(n.kind));
+    const keep = new Set(nodes.map((n) => n.id));
+    const edges = view.edges.filter((e) => keep.has(e.source) && keep.has(e.target) && (showCompose || e.kind !== 'compose'));
+    const kinds = [...new Set(edges.map((e) => e.kind))];
+    $('arch-legend').innerHTML = kinds.map((k) => {
+      const s = ARCH_EDGES[k] || { color: '#888', style: 'solid', label: k };
+      return `<span style="border-bottom: 2px ${s.style} ${s.color}">${escapeHtml(s.label)}</span>`;
+    }).join('');
+    const fg = getComputedStyle(document.body).getPropertyValue('--vscode-editor-foreground') || '#ccc';
+    const bg = getComputedStyle(document.body).getPropertyValue('--vscode-editor-background') || '#1e1e1e';
+    const display = (n) => {
+      const bits = [];
+      if (n.languages && n.languages.length) bits.push(n.languages.slice(0, 2).join('/'));
+      if (n.files && n.kind !== 'module') bits.push(`${n.files} file${n.files === 1 ? '' : 's'}`);
+      return bits.length ? `${n.label}\n${bits.join(' · ')}` : n.label;
+    };
+    if (archCy) archCy.destroy();
+    archCy = cytoscape({
+      container: $('arch'),
+      elements: [
+        ...nodes.map((n) => ({ data: { ...n, display: display(n) } })),
+        ...edges.map((e, i) => ({ data: { ...e, id: `a${i}`, width: archEdgeWidth(e) } })),
+      ],
+      wheelSensitivity: 0.3,
+      style: [
+        { selector: 'node', style: {
+          label: 'data(display)', color: fg, 'font-size': 11, 'text-valign': 'center', 'text-halign': 'center',
+          'text-wrap': 'wrap', 'text-max-width': 170, width: 'label', height: 'label', padding: 10,
+          'background-color': '#3a6ea5', 'background-opacity': 0.25, 'border-width': 1.5, 'border-color': '#3a6ea5',
+          shape: 'round-rectangle',
+        } },
+        ...Object.entries(ARCH_SHAPES).map(([k, shape]) => ({ selector: `node[kind = "${k}"]`, style: { shape } })),
+        { selector: 'node[kind = "datastore"], node[kind = "queue"]', style: { 'background-color': '#2fb383', 'border-color': '#2fb383' } },
+        { selector: 'node[kind = "service"]', style: { 'background-color': '#e05aa0', 'border-color': '#e05aa0' } },
+        { selector: 'node[kind = "cluster"]', style: { 'background-color': '#9a6ff0', 'border-color': '#9a6ff0' } },
+        { selector: 'node[kind = "module"]', style: { 'background-color': '#8a8a8a', 'border-color': '#8a8a8a', 'font-size': 10 } },
+        { selector: 'node[?outside]', style: { opacity: 0.55, 'border-style': 'dashed' } },
+        { selector: 'node[?drill]', style: { 'border-width': 2.5 } },
+        { selector: 'node:selected', style: { 'border-color': fg, 'border-width': 3 } },
+        { selector: 'edge', style: {
+          width: 'data(width)', 'curve-style': 'bezier', 'target-arrow-shape': 'triangle', 'arrow-scale': 0.9,
+          label: 'data(label)', 'font-size': 8, color: fg, 'text-rotation': 'autorotate',
+          'text-background-color': bg, 'text-background-opacity': 0.8, 'text-background-padding': 1,
+          'text-wrap': 'ellipsis', 'text-max-width': 160,
+        } },
+        ...Object.entries(ARCH_EDGES).map(([k, s]) => ({ selector: `edge[kind = "${k}"]`, style: {
+          'line-color': s.color, 'target-arrow-color': s.color, 'line-style': s.style,
+        } })),
+        { selector: 'edge:selected', style: { 'line-color': fg, 'target-arrow-color': fg } },
+      ],
+      layout: edges.length
+        ? { name: 'breadthfirst', directed: true, spacingFactor: 1.15, avoidOverlap: true, padding: 20 }
+        : { name: 'grid', padding: 20 },
+    });
+    archCy.on('tap', 'node', (evt) => archNodeDetails(evt.target.data()));
+    archCy.on('tap', 'edge', (evt) => archEdgeDetails(evt.target.data()));
+    archCy.on('dbltap', 'node', (evt) => {
+      const n = evt.target.data();
+      if (n.drill) vscode.postMessage({ type: 'drill', node: n.id });
+    });
+  }
+
+  function evidenceList(evidence) {
+    return `<ul class="symbols">${(evidence || []).map((ev) => `<li>${ev.line
+      ? `<a href="#" class="code-ref" data-path="${escapeHtml(ev.path)}" data-line="${ev.line}"><code>${escapeHtml(ev.path)}:${ev.line}</code></a>`
+      : `<code>${escapeHtml(ev.path)}</code>`} <span class="why">${escapeHtml(ev.text || '')}</span></li>`).join('')}</ul>`;
+  }
+
+  function archNodeDetails(n) {
+    const bits = [n.kind === 'code' ? 'component' : n.kind, n.source, (n.languages || []).join('/'),
+      n.files ? `${n.files} files` : '', n.symbols ? `${n.symbols} symbols` : ''].filter(Boolean);
+    const actions = [];
+    if (n.drill) actions.push(`<button type="button" data-act="drill">Open inside</button>`);
+    if (n.kind === 'module') actions.push(`<button type="button" data-act="symbols">Show its code graph</button>`, `<button type="button" data-act="open">Open file</button>`);
+    if (n.path && n.path.endsWith('/')) actions.push(`<button type="button" data-act="reveal">Reveal folder</button>`);
+    $('arch-details').innerHTML = `<h3>${escapeHtml(n.label)}</h3><p class="hint">${escapeHtml(bits.join(' · '))}</p>`
+      + (n.description ? `<p>${escapeHtml(n.description)}</p>` : '')
+      + `<div class="arch-actions">${actions.join(' ')}</div>`;
+    $('arch-details').querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', () => {
+      const act = b.dataset.act;
+      if (act === 'drill') vscode.postMessage({ type: 'drill', node: n.id });
+      else if (act === 'symbols') vscode.postMessage({ type: 'symbols', path: n.path });
+      else if (act === 'open') open(n.path, 1);
+      else if (act === 'reveal') open(n.path, 1);
+    }));
+  }
+
+  function archEdgeDetails(e) {
+    const s = ARCH_EDGES[e.kind] || { label: e.kind };
+    const kinds = e.kinds ? Object.entries(e.kinds).map(([k, v]) => `${v} ${k}`).join(', ') : '';
+    const view = archStack[archStack.length - 1];
+    const name = (id) => (view.nodes.find((n) => n.id === id) || { label: id }).label;
+    const heuristic = ['http', 'grpc', 'process', 'datastore', 'model API'].includes(e.kind)
+      ? ' Detected from patterns in the code, so check the evidence.' : '';
+    $('arch-details').innerHTML = `<h3>${escapeHtml(name(e.source))} → ${escapeHtml(name(e.target))}</h3>`
+      + `<p class="hint">${escapeHtml(s.label)}${kinds ? ` (${escapeHtml(kinds)})` : ''}.${heuristic}</p>`
+      + `<p><code>${escapeHtml(e.label || '')}</code></p>` + evidenceList(e.evidence);
+  }
+
+  $('arch-compose').addEventListener('change', () => { if (archStack.length) renderArchitecture(); });
+  $('arch-infra').addEventListener('change', () => { if (archStack.length) renderArchitecture(); });
+  $('arch-mermaid').addEventListener('click', () => {
+    const system = archStack[0];
+    if (system && system.mermaid) vscode.postMessage({ type: 'copy', text: system.mermaid });
+  });
+
+  function showComponents(components) {
+    if (!components || !components.length) return;
+    $('components-section').hidden = false;
+    $('components').innerHTML = components.map((c) => `<li><code>${escapeHtml(c.name)}</code> <span class="why">relevance ${pct(c.score)}</span></li>`).join('');
+  }
+
   function onResult(kind, r) {
     $('status').textContent = '';
+    if (kind === 'architecture') {
+      showArchitecture(r);
+      return;
+    }
     if (kind === 'ask') {
       $('answer-section').hidden = false;
       $('answer').innerHTML = markdown(r.answer || answerText);
@@ -233,6 +412,7 @@
       if (r.syntaxErrors && r.syntaxErrors.length) note('error', `Still doesn't parse: ${r.syntaxErrors.join('; ')}`);
     }
     if (kind === 'ask') {
+      showComponents(r.components);
       showGraphAnswer(r.graphAnswer);
       showRelations(r.relations, r.folderLinks);
     }

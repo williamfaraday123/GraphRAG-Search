@@ -14,6 +14,11 @@ Context for a question or an edit: which symbols the model reads.
 5. Relationships: the graph's own edges for the model to read beside the code (as the text
    search gives its model knowledge-graph facts): every edge between two named folders, then
    edges across files among the best-ranked symbols.
+
+With the architecture (architecture.py), retrieval goes top-down: components are ranked first
+(named, holding the seeds, similar to the question, then PPR over the component graph), the
+code at the boundaries between the top ones joins the seeds, and a symbol's component score is
+a fourth, light ranking signal: a boost, never a filter, so a wrong first pick costs little.
 """
 from collections import Counter
 from typing import Dict, List, Optional
@@ -24,7 +29,10 @@ from graphrag_core.ranking import hybrid_rank
 
 from .index import Index
 
-WEIGHTS = {"semantic": 0.45, "ppr": 0.4, "named": 0.15}
+WEIGHTS = {"semantic": 0.45, "ppr": 0.4, "named": 0.15, "component": 0.1}
+TOP_COMPONENTS = 3         # components whose boundaries are seeded (top-down retrieval)
+TOP_COMPONENT_SCORE = 0.3  # of the best component's score
+BOUNDARY_SEED = 0.3
 FOCUS_SEED = 1.0
 NAMED_SEED = 1.0
 OPEN_FILE_SEED = 0.15
@@ -144,21 +152,44 @@ def relationships(index: Index, ppr: Dict[str, float], context_ids: List[str], f
     return {"relations": out, "folderLinks": summary}
 
 
+def _top_down(index: Index, arch, query: str, seeds: Dict[str, float]) -> tuple:
+    """Architecture first: rank the components (architecture.rank_components), then seed the
+    code at the boundaries between the top ones, so a question that spans components reaches
+    the code that connects them (the fetch call and the route handler) and not only code
+    near the names it mentions. Returns (component scores, the top code components, whether
+    the model should read the architecture)."""
+    from . import architecture as A
+    scores = A.rank_components(index, arch, query, seeds)
+    chosen = [c for c, s in scores.items() if s >= TOP_COMPONENT_SCORE
+              and arch.components[c]["kind"] == "code"][:TOP_COMPONENTS]
+    broad = A.is_architecture_question(query)
+    if len(chosen) >= 2 or broad:
+        for sid in A.boundary_symbols(index, arch, chosen):
+            seeds[sid] = max(seeds.get(sid, 0.0), BOUNDARY_SEED)
+    return scores, chosen, broad or len(chosen) >= 2
+
+
 def retrieve(index: Index, query: str, focus: Optional[dict] = None, open_files: List[str] = (),
              mode: str = "ask", targets: List[str] = (), k: int = MAX_CONTEXT,
-             budget: int = CONTEXT_CHARS) -> dict:
+             budget: int = CONTEXT_CHARS, arch=None) -> dict:
     """mode 'ask': the named/focused symbols must be in the context.
-    mode 'edit': so must every caller of them (and of `targets`), before anything changes."""
+    mode 'edit': so must every caller of them (and of `targets`), before anything changes.
+    arch: the architecture (architecture.py), for top-down ranking: components first."""
     g = index.graph
     seeds, named, focus_id, vector, folders = _seeds(index, query, focus, list(open_files))
     for t in targets:
         if t in g.symbols:
             seeds[t] = max(seeds.get(t, 0.0), FOCUS_SEED)
+    comp_scores, top_comps, show_arch = _top_down(index, arch, query, seeds) if arch is not None and query else ({}, [], False)
     ppr, fetched = push_ppr(seeds, g.neighbours) if seeds else ({}, 0)
 
     candidates = [s for s in dict.fromkeys(list(vector) + top(ppr, 40) + list(named) + list(seeds))
                   if s in g.symbols and g.symbols[s].kind not in ("module", "folder")]
-    ranked = hybrid_rank(candidates, {"semantic": vector, "ppr": ppr, "named": named}, WEIGHTS)
+    in_component = {}
+    if comp_scores:
+        in_component = {s: comp_scores.get(arch.component_of(g.symbols[s].path) or "", 0.0) for s in candidates}
+    ranked = hybrid_rank(candidates, {"semantic": vector, "ppr": ppr, "named": named, "component": in_component},
+                         WEIGHTS)
 
     # The symbols this request is about: always read (names written as code; an ordinary word
     # that matched a name only helps the ranking)
@@ -226,7 +257,17 @@ def retrieve(index: Index, query: str, focus: Optional[dict] = None, open_files:
             reasons[sid] = f"calls {names} (coverage check)"
             add(sid, rows.get(sid))
     links = relationships(index, ppr, [c["id"] for c in context], list(folders))
+    components = [{"id": c, "name": arch.components[c]["name"], "score": round(s, 3)}
+                  for c, s in list(comp_scores.items())[:5]] if comp_scores else []
+    arch_text = boundary_code = ""
+    if show_arch:
+        from . import architecture as A
+        arch_text = A.text_for(arch, top_comps)
+        boundary_code = A.boundary_snippets(index, arch, top_comps, query)
     return {
+        "components": components,
+        "architecture": arch_text,
+        "boundaryCode": boundary_code,
         "context": context,
         "about": about,
         "focus": focus_id,

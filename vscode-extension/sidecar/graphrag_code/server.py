@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, Optional
 from graphrag_core import events
 from graphrag_core.llm import ChatClient
 
+from . import architecture as A
 from . import parsing
 from . import retrieve as R
 from .embed import make_embedder
@@ -44,6 +45,8 @@ class Server:
         self.flows: Workflows = None  # type: ignore[assignment]
         self.llm = None
         self.client_timeout = CLIENT_TIMEOUT
+        self.arch_mode = "auto"
+        self.storage = ""
         self._asked = 0
         self._waiting: Dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -94,8 +97,12 @@ class Server:
                               base_url=llm.get("baseUrl", "http://localhost:11434/v1"),
                               api_key=llm.get("apiKey") or "ollama",
                               temperature=llm.get("temperature", 0.1))
+        # How components are found: build files and compose services, Leiden clusters, or folders
+        self.arch_mode = p.get("architecture", "auto")
+        self.storage = storage
         # Graph-tool steps the model may take when a question's context has a gap (0: never)
-        self.flows = Workflows(self.index, self.llm, explore_steps=int(p.get("exploreSteps", 4)))
+        self.flows = Workflows(self.index, self.llm, explore_steps=int(p.get("exploreSteps", 4)),
+                               architecture=self.architecture_now)
         # What is in use, and why a fallback was used (the extension says so once)
         return {"root": self.index.root, "embedder": embedder.name, "vectorStore": self.index.vectors.name,
                 "vectorStoreProblem": self.index.vector_problem, "languageServers": bool(self.index.lsp),
@@ -140,7 +147,9 @@ class Server:
             sid = self.index.graph.symbol_at(self.index.rel(focus["path"]), int(focus["line"]))
             symbols = [sid] if sid else []
         affected = R.impact(self.index, symbols)
-        scores = {a["id"]: a["score"] for a in affected}
+        # Across component boundaries: clients of a changed route handler or gRPC servicer
+        affected = A.cross_impact(self.index, self.architecture_now(), symbols) + affected
+        scores = {a["id"]: a["score"] for a in affected if a["id"] in self.index.graph.symbols}
         scores.update({s: max(scores.values(), default=1.0) for s in symbols})
         return {"symbols": symbols, "impact": affected,
                 "graph": R.graph_view(self.index, scores, symbols)}
@@ -157,9 +166,28 @@ class Server:
         self._ready()
         return self.index.graph.stats()
 
+    def architecture_now(self):
+        return A.get(self.index, self.arch_mode, self.storage)
+
+    def architecture(self, p: dict, emit) -> dict:
+        """The architecture diagram at one level: the system (no node), a component (its
+        Leiden clusters or modules) or a cluster (its modules)."""
+        self._ready()
+        emit(events.status("ARCHITECTURE", "Finding components and the connections between them..."))
+        return A.view(self.index, self.architecture_now(), p.get("node") or "")
+
+    def summarize(self, p: dict, emit) -> dict:
+        """Model-written summaries of the components (cached; only changed ones are redone)."""
+        self._ready()
+        arch = self.architecture_now()
+        A.summarize(self.index, arch, self.llm, self.storage, lambda m: emit(events.status("SUMMARIZING", m)),
+                    force=bool(p.get("force")))
+        return A.view(self.index, arch, "")
+
     METHODS = {"initialize": initialize, "index": index_workspace, "update": update, "graph": graph,
                "impact": impact, "ask": ask, "edit": edit, "stats": stats,
-               "addSymbols": add_symbols, "removeFiles": remove_files}
+               "addSymbols": add_symbols, "removeFiles": remove_files,
+               "architecture": architecture, "summarize": summarize}
 
     # --- dispatch --------------------------------------------------------------------------
     def handle(self, message: dict):

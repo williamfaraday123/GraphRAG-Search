@@ -23,6 +23,8 @@
       { "command": "graphragCode.edit", "title": "Edit Code…", "category": "GraphRAG Code" },
       { "command": "graphragCode.showGraph", "title": "Show Graph Around Cursor", "category": "GraphRAG Code" },
       { "command": "graphragCode.impact", "title": "Show What Depends on This Symbol", "category": "GraphRAG Code" },
+      { "command": "graphragCode.architecture", "title": "Show System Architecture", "category": "GraphRAG Code" },
+      { "command": "graphragCode.summarizeArchitecture", "title": "Summarize Components with the Model", "category": "GraphRAG Code" },
       { "command": "graphragCode.index", "title": "Re-index Workspace", "category": "GraphRAG Code" },
       { "command": "graphragCode.restoreCheckpoint", "title": "Restore a Checkpoint…", "category": "GraphRAG Code" }
     ],
@@ -58,6 +60,12 @@
           "default": 4,
           "minimum": 0,
           "markdownDescription": "When a question's context has a gap (it names nothing the search could anchor on, or a symbol it's about didn't fit), the model may take this many steps with graph tools (`find`, `callers`, `callees`, `read`) before answering. Each step is one model call. `0`: never; every question is answered from one search."
+        },
+        "graphragCode.architecture.components": {
+          "type": "string",
+          "enum": ["auto", "manifests", "clusters", "folders"],
+          "default": "auto",
+          "markdownDescription": "How the architecture view finds components. `auto`: folders with their own build file (`package.json`, `pyproject.toml`, `requirements.txt`, `pom.xml`, `go.mod`, `Dockerfile`, ...) and docker-compose services; when fewer than two exist, Leiden clustering of the module graph. `manifests`: build files only. `clusters`: always Leiden (software architecture recovery from the code alone). `folders`: top-level folders."
         },
         "graphragCode.vectorStore": {
           "type": "string",

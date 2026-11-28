@@ -148,13 +148,32 @@ export interface ContextItem {
   id: string; path: string; start: number; end: number; kind: string; qualname: string;
   score: number; semantic: number; ppr: number; named: number; reason: string;
 }
-export interface ImpactItem { id: string; path: string; line: number; qualname: string; kind: string; score: number; direct: boolean }
+export interface ImpactItem {
+  id: string; path: string; line: number; qualname: string; kind: string; score: number; direct: boolean;
+  via?: string;        // reached across components, e.g. "HTTP DELETE /api/items/*"
+  component?: string;
+}
 export interface Relation { source: string; target: string; kind: string; guessed: boolean; text: string; path?: string; line?: number }
 export interface GraphAnswer { kind: string; summary: string; facts: Relation[]; exact: boolean }
 export interface AskResult {
   answer: string; context: ContextItem[]; graph: GraphData;
   relations?: Relation[]; folderLinks?: { from: string; to: string; count: number; text: string }[];
   graphAnswer?: GraphAnswer | null;
+  components?: { id: string; name: string; score: number }[];  // top-down retrieval
+}
+export interface Evidence { path: string; line: number; text: string }
+export interface ArchitectureNode {
+  id: string; label: string; kind: string; source?: string; files?: number; symbols?: number;
+  languages?: string[]; description?: string; path?: string; line?: number; drill: boolean; outside?: boolean;
+}
+export interface ArchitectureEdge {
+  source: string; target: string; kind: string; label: string; count: number; evidence: Evidence[];
+  kinds?: Record<string, number>;
+}
+/** One level of the architecture diagram (architecture.py view()). */
+export interface ArchitectureView {
+  level: 'system' | 'component' | 'cluster'; node: string; title: string; method: string; notes: string[];
+  nodes: ArchitectureNode[]; edges: ArchitectureEdge[]; mermaid?: string; component?: string; grouped?: boolean;
 }
 export interface ProposedFile { path: string; original: string; proposed: string; created: boolean }
 export interface EditResult {

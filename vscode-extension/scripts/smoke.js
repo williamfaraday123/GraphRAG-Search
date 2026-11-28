@@ -73,6 +73,14 @@ fs.writeFileSync(path.join(root, 'checkout.py'), [
     const updated = await sidecar.request('update', { paths: [path.join(root, 'checkout.py')] });
     assert.strictEqual(updated.edges.calls, 3, 'incremental update picks up the new call');
 
+    // The architecture view: no build files here, so Leiden clusters; a cluster opens into modules
+    const arch = await sidecar.request('architecture', {});
+    assert.strictEqual(arch.level, 'system');
+    assert.strictEqual(arch.method, 'clusters');
+    assert.ok(arch.nodes.length >= 1 && arch.mermaid.startsWith('flowchart'), 'architecture nodes and Mermaid');
+    const inner = await sidecar.request('architecture', { node: arch.nodes.find((n) => n.drill).id });
+    assert.ok(inner.nodes.some((n) => n.kind === 'module'), 'a component opens into its modules');
+
     await assert.rejects(sidecar.request('nope'), /unknown method/);
     console.log(`smoke test passed (${init.parser}, ${init.vectorStore}):`, JSON.stringify(updated.edges));
   } finally {

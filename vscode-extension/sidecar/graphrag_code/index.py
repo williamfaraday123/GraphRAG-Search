@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -36,7 +37,9 @@ logger = logging.getLogger(__name__)
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "venv", ".venv", "env", ".env", "__pycache__",
              "build", "dist", "out", "coverage", "site-packages", ".tox", ".mypy_cache", ".pytest_cache",
              ".idea", ".vscode", ".graphrag", "wheel_cache", "torch_cache", ".eggs", ".next", ".nuxt",
-             ".turbo", ".cache", "bower_components", "vendor"}
+             ".turbo", ".cache", "bower_components", "vendor", "target"}
+# A bundler's output: main.85554dd9.js, 453.0d697618.chunk.js
+HASHED_BUNDLE = re.compile(r"\.[0-9a-f]{8,}(?:\.chunk)?\.m?js$")
 MAX_FILE_BYTES = 1_000_000
 EMBED_BATCH = 64
 
@@ -84,7 +87,7 @@ class Index:
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.endswith(".egg-info")]
             for name in filenames:
                 rel = self.rel(os.path.join(dirpath, name))
-                if parsing.supported(rel):
+                if parsing.supported(rel) and not HASHED_BUNDLE.search(name):
                     found.append(rel)
         return sorted(found)
 

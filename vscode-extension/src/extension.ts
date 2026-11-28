@@ -14,7 +14,7 @@ import { CheckpointStore } from './checkpoint';
 import { EditFlow, PROPOSED_SCHEME, ProposalProvider } from './editFlow';
 import { LspGraph, LspSymbol, NOT_CODE, languageExtensions, pool } from './lspGraph';
 import { Panel } from './panel';
-import { AskResult, IndexStats, Sidecar } from './sidecarClient';
+import { ArchitectureView, AskResult, IndexStats, Sidecar } from './sidecarClient';
 
 const WATCH_DEBOUNCE_MS = 600;
 // Folders never indexed (the sidecar skips the same ones)
@@ -212,6 +212,7 @@ export function activate(context: vscode.ExtensionContext): void {
               vectorStore: config.get<string>('vectorStore', 'auto'),
               languageServers: useLanguageServers,
               exploreSteps: config.get<number>('exploreSteps', 4),
+              architecture: config.get<string>('architecture.components', 'auto'),
               llm: {
                 baseUrl: config.get<string>('llm.baseUrl'),
                 model: config.get<string>('llm.model'),
@@ -256,6 +257,22 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showErrorMessage(`GraphRAG Code: ${err.message.split('\n')[0]}`, 'Show log')
         .then((c) => { if (c) output.show(); });
       Panel.existing()?.note('error', err.message);
+    }
+  });
+
+  // What the architecture view asks for: a level further down, the code graph of a file, the
+  // Mermaid text on the clipboard
+  Panel.onAction(async (msg) => {
+    if (msg.type === 'drill' && typeof msg.node === 'string') {
+      const proc = await getSidecar();
+      panel().result('architecture', await proc.request<ArchitectureView>('architecture', { node: msg.node }));
+    } else if (msg.type === 'symbols' && typeof msg.path === 'string') {
+      const proc = await getSidecar();
+      const file = path.join(requireRoot(), ...msg.path.split('/'));
+      panel().result('graph', await proc.request('graph', { focus: { path: file, line: 1 }, openFiles: [file] }));
+    } else if (msg.type === 'copy' && typeof msg.text === 'string') {
+      await vscode.env.clipboard.writeText(msg.text);
+      void vscode.window.showInformationMessage('GraphRAG Code: the architecture diagram is on the clipboard as Mermaid.');
     }
   });
 
@@ -321,6 +338,24 @@ export function activate(context: vscode.ExtensionContext): void {
       const proc = await getSidecar();
       panel().reset('impact', `What depends on the symbol at ${path.basename(at.path)}:${at.line}`);
       panel().result('impact', await proc.request('impact', { focus: at }));
+    }),
+
+    run('graphragCode.architecture', async () => {
+      const proc = await getSidecar();
+      panel().reset('architecture', 'System architecture');
+      panel().result('architecture', await proc.request<ArchitectureView>('architecture', {}, (e) => panel().event(e)));
+    }),
+
+    run('graphragCode.summarizeArchitecture', async () => {
+      const proc = await getSidecar();
+      panel().reset('architecture', 'System architecture');
+      const view = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'GraphRAG Code: summarising components', cancellable: false },
+        (progress) => proc.request<ArchitectureView>('summarize', {}, (e) => {
+          panel().event(e);
+          if (e.type === 'status' && e.message) progress.report({ message: e.message });
+        }));
+      panel().result('architecture', view);
     }),
 
     run('graphragCode.restoreCheckpoint', async () => {

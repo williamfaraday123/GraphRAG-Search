@@ -1,0 +1,72 @@
+{
+  "_comment": "Patterns for runtime connections between components (architecture.py). Kept as data, not code, so the scanner never finds them in its own source. Python regular expressions.",
+  "http_routes": [
+    {"framework": "spring", "langs": ["java", "kotlin"],
+     "pattern": "@(Get|Post|Put|Delete|Patch|Request)Mapping\\b(\\([^)]*\\))?"},
+    {"framework": "flask/fastapi", "langs": ["python"],
+     "pattern": "@\\w+\\.(get|post|put|delete|patch|route|api_route)\\(\\s*[rf]?[\"']([^\"']*)[\"']([^)]*)\\)"},
+    {"framework": "express", "langs": ["javascript", "typescript"],
+     "pattern": "\\b(?:app|router|server|api|routes)\\.(get|post|put|delete|patch|all)\\(\\s*[\"'`](/[^\"'`]*)[\"'`]"},
+    {"framework": "go", "langs": ["go"],
+     "pattern": "\\.(GET|POST|PUT|DELETE|PATCH|HandleFunc|Handle)\\(\\s*\"(/[^\"]*)\""},
+    {"framework": "aspnet", "langs": ["csharp"],
+     "pattern": "\\[Http(Get|Post|Put|Delete|Patch)(?:\\(\\s*\"([^\"]*)\"\\s*\\))?\\]"}
+  ],
+  "route_prefixes": [
+    {"langs": ["java", "kotlin"], "pattern": "@RequestMapping\\(\\s*(?:(?:value|path)\\s*=\\s*)?\\{?\\s*\"([^\"]*)\""},
+    {"langs": ["python"], "pattern": "(?:APIRouter|Blueprint)\\([^)]*?(?:prefix|url_prefix)\\s*=\\s*[\"']([^\"']*)[\"']"},
+    {"langs": ["csharp"], "pattern": "\\[Route\\(\\s*\"([^\"]*)\"\\s*\\)\\]"}
+  ],
+  "http_clients": [
+    {"langs": ["javascript", "typescript"], "pattern": "\\bfetch\\(\\s*(`[^`]*`|'[^'\\n]*'|\"[^\"\\n]*\")"},
+    {"langs": ["javascript", "typescript"], "pattern": "\\baxios\\.(get|post|put|delete|patch)\\(\\s*(`[^`]*`|'[^'\\n]*'|\"[^\"\\n]*\")"},
+    {"langs": ["python"], "pattern": "\\b(?:requests|httpx|session|client|aiohttp)\\.(get|post|put|delete|patch)\\(\\s*f?(\"[^\"\\n]*\"|'[^'\\n]*')"},
+    {"langs": ["java", "kotlin"], "pattern": "\\.(getForObject|getForEntity|postForObject|postForEntity|put|delete|exchange|uri)\\(\\s*(\"[^\"\\n]*\")"},
+    {"langs": ["go"], "pattern": "http\\.(Get|Post)\\(\\s*(\"[^\"\\n]*\")"}
+  ],
+  "url_literals": {"langs": ["javascript", "typescript", "python", "java", "kotlin", "go", "csharp"],
+                   "pattern": "(`|\"|')((?:https?://[\\w.\\-]+(?::\\d+)?|\\$\\{[^}`]+\\})(/[\\w\\-./{}$%:]*)[^`\"'\\s]*)\\1"},
+  "grpc_servers": [
+    {"langs": ["python"], "pattern": "add_(\\w+?)Servicer_to_server\\("},
+    {"langs": ["python"], "pattern": "class\\s+\\w+\\(\\s*(?:\\w+\\.)?(\\w+?)Servicer\\s*\\)"},
+    {"langs": ["java", "kotlin"], "pattern": "extends\\s+(\\w+?)Grpc\\.\\w+ImplBase"},
+    {"langs": ["go"], "pattern": "Register(\\w+?)Server\\("},
+    {"langs": ["javascript", "typescript"], "pattern": "addService\\(\\s*[\\w.]*?(\\w+)\\.service"}
+  ],
+  "grpc_clients": [
+    {"langs": ["python"], "pattern": "(?<!class )\\b(?:\\w+\\.)?(\\w+?)Stub\\s*\\("},
+    {"langs": ["java", "kotlin"], "pattern": "(\\w+?)Grpc\\.new(?:Blocking|Future)?Stub\\("},
+    {"langs": ["go"], "pattern": "New(\\w+?)Client\\("}
+  ],
+  "processes": [
+    {"langs": ["javascript", "typescript", "python"], "pattern": "[\"']-m[\"']\\s*,\\s*[\"']([\\w.]+)[\"']"}
+  ],
+  "infrastructure": [
+    {"id": "neo4j", "name": "Neo4j", "kind": "datastore", "images": ["neo4j"],
+     "pattern": "GraphDatabase\\.driver|\\bneo4j(?:\\+s)?://|\\bbolt://|org\\.neo4j\\.driver|from neo4j import|^import neo4j|neo4j-driver"},
+    {"id": "milvus", "name": "Milvus", "kind": "datastore", "images": ["milvus"],
+     "pattern": "from pymilvus|import pymilvus|MilvusClient\\(|io\\.milvus|@zilliz/milvus"},
+    {"id": "minio", "name": "MinIO / S3", "kind": "datastore", "images": ["minio"],
+     "pattern": "\\bMinio\\(|from minio import|io\\.minio|boto3\\.(?:client|resource)\\(\\s*['\"]s3|@aws-sdk/client-s3"},
+    {"id": "etcd", "name": "etcd", "kind": "datastore", "images": ["etcd"], "pattern": "import etcd3|go\\.etcd\\.io"},
+    {"id": "postgres", "name": "PostgreSQL", "kind": "datastore", "images": ["postgres", "postgis"],
+     "pattern": "import psycopg|from psycopg|asyncpg|jdbc:postgresql|\\bpostgres(?:ql)?://|from 'pg'|require\\(['\"]pg['\"]\\)"},
+    {"id": "mysql", "name": "MySQL", "kind": "datastore", "images": ["mysql", "mariadb"],
+     "pattern": "pymysql|mysql\\.connector|jdbc:mysql|\\bmysql://|mysql2"},
+    {"id": "mongodb", "name": "MongoDB", "kind": "datastore", "images": ["mongo"],
+     "pattern": "MongoClient\\(|mongodb(?:\\+srv)?://|from pymongo|import pymongo|mongoose"},
+    {"id": "redis", "name": "Redis", "kind": "datastore", "images": ["redis", "valkey"],
+     "pattern": "redis\\.Redis\\(|\\bredis://|from redis import|^import redis\\b|ioredis|\\bJedis\\b"},
+    {"id": "kafka", "name": "Kafka", "kind": "queue", "images": ["kafka"],
+     "pattern": "KafkaProducer|KafkaConsumer|kafkajs|from confluent_kafka"},
+    {"id": "rabbitmq", "name": "RabbitMQ", "kind": "queue", "images": ["rabbitmq"],
+     "pattern": "^import pika|\\bamqps?://|amqplib"},
+    {"id": "elasticsearch", "name": "Elasticsearch", "kind": "datastore", "images": ["elasticsearch", "opensearch"],
+     "pattern": "from elasticsearch|Elasticsearch\\(|@elastic/elasticsearch"},
+    {"id": "sqlite", "name": "SQLite", "kind": "datastore", "images": [],
+     "pattern": "sqlite3\\.connect\\(|better-sqlite3|jdbc:sqlite"},
+    {"id": "lancedb", "name": "LanceDB", "kind": "datastore", "images": [], "pattern": "lancedb\\.connect\\("},
+    {"id": "llm", "name": "LLM API (OpenAI-compatible / Ollama)", "kind": "service", "images": ["ollama"],
+     "pattern": "/v1/chat/completions|/chat/completions\\b|from openai import|^import openai|import ollama|from ollama|ChatOpenAI\\(|ChatOllama\\(|api\\.anthropic\\.com|from anthropic import|localhost:11434"}
+  ]
+}

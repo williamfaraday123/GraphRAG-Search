@@ -182,8 +182,46 @@ def _fact(index: Index, e, why: str = "") -> dict:
     return fact
 
 
-def answer(index: Index, question: dict) -> dict:
-    """Runs the graph query: {kind, targets, summary, facts: [relation + path/line], symbols}."""
+def _runtime_facts(arch, kind: str, targets: List[Target]) -> List[dict]:
+    """Runtime connections (architecture.py) into, out of or between the target folders."""
+    from .architecture import connection_text
+
+    def side(cid: str, folder: str, path_of_side: List[str]) -> bool:
+        comp = arch.components.get(cid) or {}
+        p = comp.get("path") or ""
+        if p and (p == folder or p.startswith(folder + "/")):
+            return True  # the component is (in) the folder
+        return any(R._in_folder(x, folder) for x in path_of_side)  # the folder is part of it
+
+    out = []
+    for c in arch.connections:
+        if c["kind"] in ("code", "compose"):
+            continue
+        ev = c["evidence"]
+        src_paths = [e["path"] for e in ev if arch.component_of(e["path"]) == c["from"]]
+        dst_paths = [e["path"] for e in ev if arch.component_of(e["path"]) == c["to"]]
+        a = targets[0].folder
+        if kind == "between" and len(targets) > 1 and targets[1].folder:
+            b = targets[1].folder
+            hit = (side(c["from"], a, src_paths) and side(c["to"], b, dst_paths)) or \
+                  (side(c["from"], b, src_paths) and side(c["to"], a, dst_paths))
+        elif kind in ("callers", "impact"):
+            hit = bool(a) and side(c["to"], a, dst_paths) and not side(c["from"], a, src_paths)
+        elif kind == "callees":
+            hit = bool(a) and side(c["from"], a, src_paths) and not side(c["to"], a, dst_paths)
+        else:
+            hit = False
+        if hit:
+            first = ev[0] if ev else {}
+            out.append({"source": c["from"], "target": c["to"], "kind": c["kind"], "guessed": True,
+                        "text": connection_text(arch, c), "path": first.get("path", ""), "line": first.get("line", 0),
+                        "why": "runtime connection (detected)"})
+    return out
+
+
+def answer(index: Index, question: dict, arch=None) -> dict:
+    """Runs the graph query: {kind, targets, summary, facts: [relation + path/line], symbols}.
+    With the architecture, questions about folders also get runtime connections."""
     g = index.graph
     kind, targets = question["kind"], question["targets"]
     t = targets[0]
@@ -245,6 +283,13 @@ def answer(index: Index, question: dict) -> dict:
                          + (f" ({', '.join(f'{n} {k}' for k, n in kinds.most_common())})" if edges else ""))
             facts += [_fact(index, e) for e in edges[:MAX_FACTS // 2]]
         summary = "; ".join(lines)
+
+    # Folders: connections no import shows (HTTP, gRPC, processes, datastores), from the architecture
+    if arch is not None and any(x.folder for x in targets):
+        runtime = _runtime_facts(arch, kind, targets)
+        if runtime:
+            summary += "; runtime connections (detected, not imports): " + "; ".join(f["text"] for f in runtime[:6])
+            facts = runtime + facts
 
     exact = bool(settled and settled.get("checked"))
     if exact:

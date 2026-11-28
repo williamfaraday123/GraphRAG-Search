@@ -35,6 +35,31 @@ It's a separate package in the same repository. It shares a small core with the 
 
 **Show Graph Around Cursor** and **Show What Depends on This Symbol** need no model: they draw the PPR neighbourhood as a graph (node colour and size show the PPR score; components are hexagons, interfaces and types diamonds). Clicking a node opens the code.
 
+## System architecture
+
+**Show System Architecture** draws the repository as a graph above the code graph, in the C4 model's levels: system → components → sub-components → modules → symbols. It needs no model, and it updates when the code changes (`architecture.py`).
+
+- **Components** are folders with their own build file (`package.json`, `pyproject.toml`, `requirements.txt`, `pom.xml`, `build.gradle`, `go.mod`, `Cargo.toml`, `*.csproj`, `Dockerfile`, ...) and docker-compose services. A repository with fewer than two of these is clustered instead: **Leiden community detection** over the module graph (files as nodes, code edges summed up between them, folders as a light extra signal). This is software architecture recovery from the code alone. Leiden is in the shared core (`core/graphrag_core/leiden.py`), in plain Python. `graphragCode.architecture.components` chooses `auto`, `manifests`, `clusters` or `folders`.
+- **Infrastructure** that the code talks to (Neo4j, Milvus, MinIO/S3, PostgreSQL, Redis, Kafka, an OpenAI-compatible or Ollama endpoint, ...) comes from client code and compose images.
+- **Connections**, each with its evidence (file and line):
+  - **code**: every symbol-level edge between two components, summed up. Edges guessed from a method name, and matches between languages that can't call each other, don't count across a boundary.
+  - **HTTP**: a client's URL (`fetch`, axios, requests, RestTemplate, ...) matched to a server's route (Spring, Flask/FastAPI, Express, Go, ASP.NET), with path parameters and base-URL variables handled.
+  - **gRPC**: a stub matched to a servicer by service name, with the rpcs from the `.proto` file.
+  - **process**: a component that starts another with `-m module`.
+  - **datastore / model API**: client constructors and URLs.
+  - **docker-compose**: `depends_on`, and service names in environment values (`NEO4J_URI=bolt://neo4j:7687`).
+
+  The runtime connections are found by patterns (`detectors.json`): a framework no pattern knows won't appear, and the panel says which edges were detected.
+- **Drill-down:** double-click a component, or select it and click "Open inside", to see its Leiden clusters (sub-components) or its modules, with neighbouring components faded at the ends of the edges that leave it. A module shows its symbol graph. Clicking an edge lists its evidence. **Copy as Mermaid** exports the diagram for documentation.
+- **Summaries (optional):** **Summarize Components with the Model** writes two sentences per component from its build file description, README, most-used symbols and connections. Each summary is cached by a hash of that input, so only new or changed components cost a model call. The summaries also help the top-down search.
+
+Searches and edits use the architecture **top-down**:
+
+1. **Components first.** Before the code is ranked, the components are ranked: those the question names, those holding its starting points, and those whose profile (summary, description, main symbols, connections) is similar to the question. Then PPR runs over the component graph, so a component connected to those also scores. The panel lists them under "Components first".
+2. **Then the code at their boundaries.** When two or more components matter, or the question is about the system, the code at the connections between them joins the starting points: the fetch call and the route handler, the stub and the servicer. A symbol's component score is a fourth, light ranking signal (a boost, never a filter, so a wrong first pick costs little).
+3. **The model reads the architecture.** A question spanning components gets the component list and connections in its prompt. It also gets the code around the endpoints in files that nothing parses, so a Java controller is still read when the Java language server isn't installed. A broad question ("give me an overview of the architecture", "how does a request flow through the system?") is answered from the component graph first, like the structural questions.
+4. **Impact analysis crosses boundaries.** Changing a route handler or a gRPC servicer lists its clients in other components ("across the boundary: HTTP DELETE /api/items/*"), which no import connects to it. Questions about a folder ("which code uses the server folder?") get the runtime connections too.
+
 ## Languages
 
 | | Python | TypeScript / TSX / JavaScript / JSX |
@@ -80,7 +105,7 @@ Then open `vscode-extension/` in VS Code and press F5 (Run Extension). In the ne
 
 To build a `.vsix`, run `npm run package`. It copies the shared core into `sidecar/vendor` first (`npm run bundle-core`). The `.vsix` doesn't contain the Python environment, so run `setup-python` (or point `pythonPath` at a Python with the requirements) wherever it's installed.
 
-Settings (`graphragCode.*`): `pythonPath`, `parser` (`auto` or `ast`), `languageServers` (on by default), `exploreSteps` (4; 0 turns exploring off), `vectorStore` (`auto`, `lancedb` or `sqlite`), `llm.baseUrl`, `llm.model`, `llm.apiKey`, `embeddingModel`, `verify.testCommand`, `verify.maxAttempts`, `verify.diagnosticsTimeoutSeconds`.
+Settings (`graphragCode.*`): `pythonPath`, `parser` (`auto` or `ast`), `languageServers` (on by default), `exploreSteps` (4; 0 turns exploring off), `architecture.components` (`auto`, `manifests`, `clusters` or `folders`), `vectorStore` (`auto`, `lancedb` or `sqlite`), `llm.baseUrl`, `llm.model`, `llm.apiKey`, `embeddingModel`, `verify.testCommand`, `verify.maxAttempts`, `verify.diagnosticsTimeoutSeconds`.
 
 ## Tests
 
@@ -88,7 +113,8 @@ Settings (`graphragCode.*`): `pythonPath`, `parser` (`auto` or `ast`), `language
 npm test
 ```
 This runs:
-- the shared core's tests;
+- the shared core's tests, including Leiden (the karate-club benchmark near the best known modularity, cliques, connected communities);
+- the architecture graph: components from build files and compose services, Leiden clusters when there are none, HTTP/gRPC/process/datastore/compose connections, the drill-down views and Mermaid, top-down retrieval, impact across components, the architecture question in the workflow, cached summaries, and the docker-compose YAML parser;
 - the sidecar's tests: parsing (including tree-sitter/ast parity and a TypeScript/React project), resolution, incremental updates, LanceDB, retrieval, coverage, impact, the edit format in both languages, both workflows with a fake model, and the stdio protocol;
 - questions about structure: names written as code versus plain words, folders as starting points, folder nodes, the relationships in the prompt, structural questions (classification, answers, the language-server check, the workflow), and exploring with graph tools (gap detection, a scripted model, malformed replies, turning it off);
 - language servers with a fake standing in for VS Code (sidecar side): symbols from a Kotlin file, edges loaded lazily and cached until the file changes, guessed callers confirmed, dropped and added, an edit, and the sidecar asking the extension over stdio;
@@ -103,6 +129,7 @@ No model is needed. The tests use `sidecar/.venv` when it exists. `PYTHON=python
 - **Parsed languages vs. language servers.** Python and TypeScript/JavaScript are parsed: the whole graph is ready in milliseconds, with `imports` and `renders` edges. Other languages depend on their language server: no edges until a search reaches their symbols (a few seconds the first time), and only what the server reports. A parser module for a language (see `sidecar/graphrag_code/parse_treesitter.py`) makes it faster and richer, but isn't needed for it to work. Language-server symbols are read for at most 2,000 files per workspace. In JS/TS, non-relative imports (packages, and `tsconfig` path aliases such as `@/components`) and `require()` aren't followed by the parser.
 - **Dynamic calls are incomplete.** A call on a receiver of unknown type (`obj.save()`) is linked to a method of that name only when there are at most 3 in the repository, as a "guessed" edge at half weight. Guessed edges don't count as callers for the coverage check. Calls into packages outside the repository are not followed.
 - **Large repositories.** Re-indexing a file re-parses only that file, but the graph is re-resolved from every file's stored parse result. That takes milliseconds for hundreds of files, but very large monorepos would need incremental resolution.
+- **Runtime connections are heuristic.** HTTP, gRPC, process and datastore connections come from patterns, not from running the system: a framework or client library no pattern knows is missed, and a URL built at runtime from pieces can't be matched to a route. Every such edge keeps its evidence so it can be checked. The architecture's code connections come from parsed files and from language-server edges already loaded; files only a language server reads add little to them until searches have reached their symbols.
 - **Edit quality depends on the model.** Small local models handle a few symbols. With `qwen3:4b-instruct`, a Python signature change with its caller worked, and so did a TSX change: a new prop on a component and its interface, passed from the component that renders it. The model also tends to rewrite symbols it wasn't asked to touch (unchanged rewrites are ignored, real ones show up in the diff). Use a larger model for bigger multi-file changes.
 - **Not yet evaluated.** Aider's repo map already ranks context with a graph. This extension's differences are question-centred PPR (from the cursor and the question, not a global ranking), the coverage check and the visual graph. Whether those give better answers and edits needs an evaluation on real tasks.
 
